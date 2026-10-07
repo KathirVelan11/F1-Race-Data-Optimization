@@ -10,6 +10,23 @@ type DashboardStats = {
   source: string
 }
 
+type DatasetOverview = {
+  total_rows: number
+  total_races: number
+  total_drivers: number
+  total_teams: number
+  years_range: string
+  races_per_year: Record<string, number>
+  compound_distribution: Record<string, number>
+  pit_stop_stats: {
+    count: number
+    mean_duration_seconds: number
+    min_duration_seconds: number
+    max_duration_seconds: number
+  }
+  mean_max_stint_life_by_compound: Record<string, number>
+}
+
 type StrategyStage = {
   compound: string
   start_lap: number
@@ -32,6 +49,16 @@ type StrategyPreview = {
   message?: string
   solver_status?: string
   objective_value_z?: number
+  pit_loss_seconds?: number
+  max_pit_stops?: number
+  min_stint_length?: number
+  max_pit_stops_valid_range?: [number, number]
+  min_stint_length_valid_range?: [number, number]
+  targets?: {
+    target_race_time_seconds: number
+    target_pit_stops: number
+    target_degradation_index: number
+  }
 }
 
 type ComparisonResult = {
@@ -67,6 +94,10 @@ function App() {
   const [comparison, setComparison] = useState<ComparisonResult | null>(null)
   const [weights, setWeights] = useState<GoalWeights>(DEFAULT_WEIGHTS)
   const [loading, setLoading] = useState(false)
+  const [activeModelTab, setActiveModelTab] = useState<'model1' | 'model2'>('model1')
+  const [overview, setOverview] = useState<DatasetOverview | null>(null)
+  const [maxPitStopsInput, setMaxPitStopsInput] = useState<string>('')
+  const [minStintLengthInput, setMinStintLengthInput] = useState<string>('')
 
   useEffect(() => {
     const loadDashboard = async () => {
@@ -82,6 +113,20 @@ function App() {
     }
 
     loadDashboard()
+  }, [])
+
+  useEffect(() => {
+    const loadOverview = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/dataset/overview`)
+        const data = await response.json()
+        setOverview(data)
+      } catch (error) {
+        console.error('Dataset overview load failed', error)
+      }
+    }
+
+    loadOverview()
   }, [])
 
   useEffect(() => {
@@ -161,6 +206,15 @@ function App() {
       ? `Fastest option uses ${stages.length} stint${stages.length === 1 ? '' : 's'} with ${payload.pit_laps?.length ?? 0} pit stop${(payload.pit_laps?.length ?? 0) === 1 ? '' : 's'}.`
       : `Balanced option prioritizes a controlled trade-off across ${stages.length} stint${stages.length === 1 ? '' : 's'} and ${payload.pit_stop_count ?? 0} stop${(payload.pit_stop_count ?? 0) === 1 ? '' : 's'}.`
 
+    const PIT_LOSS_SECONDS = payload.pit_loss_seconds ?? 13.0
+    const pitStops = stages.slice(0, -1).map((stage, index) => ({
+      stopNumber: index + 1,
+      lap: stage.end_lap,
+      fromCompound: stage.compound,
+      toCompound: stages[index + 1]?.compound ?? '—',
+      costSeconds: PIT_LOSS_SECONDS,
+    }))
+
     return (
       <article className="card info-panel">
         <div className="panel-header">
@@ -200,22 +254,99 @@ function App() {
             <strong>{((highlight === 'fastest' ? payload.estimated_race_time_seconds : payload.balanced_race_time_seconds) ?? 0).toFixed(1)} s</strong>
           </div>
           <p className="strategy-summary">{summaryText}</p>
+
+          {highlight === 'fastest' && (
+            <p className="block-hint">
+              Model 1 optimizes for pure race time only &mdash; see Model 2 for the full
+              pit-stop and degradation breakdown.
+            </p>
+          )}
+
+          {highlight === 'balanced' && payload.targets && (
+            <div className="goal-targets">
+              <h4>Goal programming targets</h4>
+              <div className="summary-list">
+                <div><span>Target race time (T*)</span><strong>{payload.targets.target_race_time_seconds.toFixed(1)}s</strong></div>
+                <div><span>Target pit stops (P*)</span><strong>{payload.targets.target_pit_stops}</strong></div>
+                <div><span>Target degradation (D*)</span><strong>{payload.targets.target_degradation_index.toFixed(2)}</strong></div>
+              </div>
+            </div>
+          )}
+
+          {highlight === 'balanced' && (
+            <div className="pit-stop-list">
+              <p className="block-hint">Pit loss at this track: {PIT_LOSS_SECONDS.toFixed(1)}s per stop (from recorded pit stop durations).</p>
+              <h4>Pit stops</h4>
+              {pitStops.length === 0 ? (
+                <p className="empty-state">No pit stops in this strategy.</p>
+              ) : (
+                <>
+                  {pitStops.map((stop) => (
+                    <div key={stop.stopNumber} className="pit-stop-row">
+                      <span className="pit-stop-index">Stop {stop.stopNumber}</span>
+                      <span className="pit-stop-lap">Lap {stop.lap}</span>
+                      <span className="pit-stop-change">
+                        <span className="dot" data-compound={stop.fromCompound}></span>
+                        {stop.fromCompound}
+                        <span className="pit-stop-arrow">&rarr;</span>
+                        <span className="dot" data-compound={stop.toCompound}></span>
+                        {stop.toCompound}
+                      </span>
+                      <span className="pit-stop-cost">+{stop.costSeconds.toFixed(1)}s</span>
+                    </div>
+                  ))}
+                  <div className="pit-stop-total">
+                    <span>Total pit time</span>
+                    <strong>+{(pitStops.length * PIT_LOSS_SECONDS).toFixed(1)}s</strong>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </article>
     )
   }
 
+  const WEIGHT_KEYS: (keyof GoalWeights)[] = ['weight_time_w1', 'weight_pit_stops_w2', 'weight_degradation_w3']
+
   const updateWeight = (key: keyof GoalWeights, value: number) => {
-    setWeights((previous) => ({
-      ...previous,
-      [key]: Number(value),
-    }))
+    setWeights((previous) => {
+      const newValue = Math.min(1, Math.max(0, Number(value)))
+      const otherKeys = WEIGHT_KEYS.filter((k) => k !== key)
+      const otherSum = otherKeys.reduce((sum, k) => sum + previous[k], 0)
+      const remaining = Math.max(0, 1 - newValue)
+
+      const next = { ...previous, [key]: newValue }
+      if (otherSum <= 0) {
+        // Split the remainder evenly if the other two are both zero.
+        otherKeys.forEach((k) => { next[k] = remaining / otherKeys.length })
+      } else {
+        // Rescale the other two proportionally so the total always stays at 1.
+        otherKeys.forEach((k) => { next[k] = (previous[k] / otherSum) * remaining })
+      }
+
+      // Round to avoid floating-point drift (e.g. 0.30000000000000004) breaking the
+      // backend's strict sum-to-1 validation.
+      const rounded = WEIGHT_KEYS.reduce((acc, k) => ({ ...acc, [k]: Math.round(next[k] * 100) / 100 }), {} as GoalWeights)
+      const roundedSum = WEIGHT_KEYS.reduce((sum, k) => sum + rounded[k], 0)
+      const drift = Math.round((1 - roundedSum) * 100) / 100
+      if (drift !== 0) {
+        // Absorb any leftover rounding drift into the largest of the other two weights.
+        const adjustKey = otherKeys.reduce((a, b) => (rounded[a] >= rounded[b] ? a : b))
+        rounded[adjustKey] = Math.round((rounded[adjustKey] + drift) * 100) / 100
+      }
+      return rounded
+    })
   }
 
   const runStrategyPreview = async () => {
     if (!selectedYear || !selectedRace) return
     setLoading(true)
     try {
+      const maxPitStops = maxPitStopsInput.trim() === '' ? undefined : Number(maxPitStopsInput)
+      const minStintLength = minStintLengthInput.trim() === '' ? undefined : Number(minStintLengthInput)
+
       const response = await fetch(`${API_BASE}/compare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -224,6 +355,8 @@ function App() {
           race_name: selectedRace,
           driver_code: selectedDriver || undefined,
           weights,
+          max_pit_stops: maxPitStops,
+          min_stint_length: minStintLength,
         }),
       })
 
@@ -262,7 +395,6 @@ function App() {
           <p className="eyebrow">Operations Research Project</p>
           <h1>F1 Race Strategy Optimizer</h1>
         </div>
-        <div className="status-pill">React + FastAPI</div>
       </header>
 
       <main className="dashboard">
@@ -301,37 +433,167 @@ function App() {
           </article>
         </section>
 
+        {overview && (
+          <section className="card overview-panel">
+            <div className="panel-header">
+              <h3>Dataset overview</h3>
+              <p className="panel-subtitle">
+                {overview.total_teams} teams &middot; {overview.total_drivers} drivers &middot; {overview.total_rows.toLocaleString()} lap records
+                across {overview.years_range}
+              </p>
+            </div>
+
+            <div className="overview-grid">
+              <div className="overview-block">
+                <h4>Races per season</h4>
+                <div className="bar-list">
+                  {Object.entries(overview.races_per_year).map(([year, count]) => {
+                    const maxCount = Math.max(...Object.values(overview.races_per_year))
+                    return (
+                      <div className="bar-row" key={year}>
+                        <span className="bar-label">{year}</span>
+                        <div className="bar-track">
+                          <div className="bar-fill" style={{ width: `${(count / maxCount) * 100}%` }} />
+                        </div>
+                        <span className="bar-value">{count}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="overview-block">
+                <h4>Compound usage (lap records)</h4>
+                <div className="bar-list">
+                  {Object.entries(overview.compound_distribution).map(([compound, count]) => {
+                    const maxCount = Math.max(...Object.values(overview.compound_distribution))
+                    return (
+                      <div className="bar-row" key={compound}>
+                        <span className="bar-label">
+                          <span className="dot" data-compound={compound}></span>
+                          {compound}
+                        </span>
+                        <div className="bar-track">
+                          <div className="bar-fill" data-compound={compound} style={{ width: `${(count / maxCount) * 100}%` }} />
+                        </div>
+                        <span className="bar-value">{count.toLocaleString()}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="overview-block">
+                <h4>Mean max stint life (laps)</h4>
+                <p className="block-hint">Used as the max stint durability constraint in both models, for every compound a race actually used.</p>
+                <div className="chip-list">
+                  {Object.entries(overview.mean_max_stint_life_by_compound)
+                    .filter(([compound]) => compound !== 'UNKNOWN')
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([compound, laps]) => (
+                      <div key={compound} className="stage-chip">
+                        <span className="dot" data-compound={compound}></span>
+                        <div>
+                          <strong>{compound}</strong>
+                          <small>{laps} laps avg</small>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              <div className="overview-block">
+                <h4>Pit stop statistics</h4>
+                <div className="summary-list">
+                  <div><span>Recorded stops</span><strong>{overview.pit_stop_stats.count.toLocaleString()}</strong></div>
+                  <div><span>Mean duration</span><strong>{overview.pit_stop_stats.mean_duration_seconds.toFixed(2)}s</strong></div>
+                  <div><span>Fastest stop</span><strong>{overview.pit_stop_stats.min_duration_seconds.toFixed(2)}s</strong></div>
+                  <div><span>Slowest stop</span><strong>{overview.pit_stop_stats.max_duration_seconds.toFixed(2)}s</strong></div>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
         <section className="controls card">
-          <div className="field">
-            <label htmlFor="year">Season</label>
-            <select id="year" value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>
-              {seasons.map((year) => (
-                <option key={year} value={year}>{year}</option>
-              ))}
-            </select>
+          <div className="controls-group">
+            <h4 className="controls-group-title">Race selection</h4>
+            <div className="controls-group-fields controls-group-fields--three">
+              <div className="field">
+                <label htmlFor="year">Season</label>
+                <select id="year" value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>
+                  {seasons.map((year) => (
+                    <option key={year} value={year}>{year}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field">
+                <label htmlFor="race">Grand Prix</label>
+                <select id="race" value={selectedRace} onChange={(event) => setSelectedRace(event.target.value)}>
+                  {races.map((race) => (
+                    <option key={race} value={race}>{race}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="field">
+                <label htmlFor="driver">Driver</label>
+                <select id="driver" value={selectedDriver} onChange={(event) => setSelectedDriver(event.target.value)}>
+                  <option value="">All drivers</option>
+                  {drivers.map((driver) => (
+                    <option key={driver} value={driver}>{driver}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
           </div>
 
-          <div className="field">
-            <label htmlFor="race">Grand Prix</label>
-            <select id="race" value={selectedRace} onChange={(event) => setSelectedRace(event.target.value)}>
-              {races.map((race) => (
-                <option key={race} value={race}>{race}</option>
-              ))}
-            </select>
+          <div className="controls-group">
+            <h4 className="controls-group-title">Strategy constraints</h4>
+            <div className="controls-group-fields controls-group-fields--two">
+              <div className="field">
+                <label htmlFor="max-pit-stops">
+                  Max pit stops
+                  {comparison?.scope1?.max_pit_stops_valid_range && (
+                    <small className="field-hint">
+                      {' '}(valid {comparison.scope1.max_pit_stops_valid_range[0]}-{comparison.scope1.max_pit_stops_valid_range[1]})
+                    </small>
+                  )}
+                </label>
+                <input
+                  id="max-pit-stops"
+                  type="number"
+                  min={1}
+                  placeholder="Auto (data-driven)"
+                  value={maxPitStopsInput}
+                  onChange={(event) => setMaxPitStopsInput(event.target.value)}
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="min-stint-length">
+                  Min stint length (laps)
+                  {comparison?.scope1?.min_stint_length_valid_range && (
+                    <small className="field-hint">
+                      {' '}(valid {comparison.scope1.min_stint_length_valid_range[0]}-{comparison.scope1.min_stint_length_valid_range[1]})
+                    </small>
+                  )}
+                </label>
+                <input
+                  id="min-stint-length"
+                  type="number"
+                  min={1}
+                  placeholder="Auto (data-driven)"
+                  value={minStintLengthInput}
+                  onChange={(event) => setMinStintLengthInput(event.target.value)}
+                />
+              </div>
+            </div>
           </div>
 
-          <div className="field">
-            <label htmlFor="driver">Driver</label>
-            <select id="driver" value={selectedDriver} onChange={(event) => setSelectedDriver(event.target.value)}>
-              <option value="">All drivers</option>
-              {drivers.map((driver) => (
-                <option key={driver} value={driver}>{driver}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field">
-            <label>Goal priorities</label>
+          <div className="controls-group controls-group--weights">
+            <h4 className="controls-group-title">Goal priorities (Model 2)</h4>
             <div className="weight-box">
               <div className="weight-row">
                 <span>Time</span>
@@ -348,12 +610,16 @@ function App() {
                 <strong>{weights.weight_degradation_w3.toFixed(2)}</strong>
               </div>
               <input type="range" min="0" max="1" step="0.05" value={weights.weight_degradation_w3} onChange={(event) => updateWeight('weight_degradation_w3', Number(event.target.value))} />
+              <small className="field-hint">Always sums to 1.00 &mdash; adjusting one rescales the others.</small>
             </div>
           </div>
 
           <button type="button" className="primary-button" onClick={runStrategyPreview} disabled={loading}>
             {loading ? 'Generating...' : 'Generate strategy comparison'}
           </button>
+          {!comparison && !loading && (
+            <p className="controls-hint">Select a race above and click Generate to run both models.</p>
+          )}
         </section>
 
         <section className="content-grid">
@@ -374,8 +640,27 @@ function App() {
             )}
           </article>
 
-          {renderStrategyCard('Fastest strategy', comparison?.scope1 ?? strategy, 'fastest')}
-          {renderStrategyCard('Balanced strategy', comparison?.scope2 ?? null, 'balanced')}
+          <article className="card info-panel model-tabs-panel">
+            <div className="model-tabs">
+              <button
+                type="button"
+                className={activeModelTab === 'model1' ? 'model-tab active' : 'model-tab'}
+                onClick={() => setActiveModelTab('model1')}
+              >
+                Model 1 - Fastest (MILP)
+              </button>
+              <button
+                type="button"
+                className={activeModelTab === 'model2' ? 'model-tab active' : 'model-tab'}
+                onClick={() => setActiveModelTab('model2')}
+              >
+                Model 2 - Balanced (Goal Programming)
+              </button>
+            </div>
+            {activeModelTab === 'model1'
+              ? renderStrategyCard('Fastest strategy', comparison?.scope1 ?? strategy, 'fastest')
+              : renderStrategyCard('Balanced strategy', comparison?.scope2 ?? null, 'balanced')}
+          </article>
         </section>
 
         {comparison && (

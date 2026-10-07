@@ -102,11 +102,45 @@
 }
 
 .controls {
-  padding: 22px;
+  padding: 24px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
-  gap: 18px;
-  align-items: end;
+  gap: 24px;
+}
+
+.controls-group {
+  display: grid;
+  gap: 12px;
+}
+
+.controls-group-title {
+  margin: 0;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #93c5fd;
+}
+
+.controls-group-fields {
+  display: grid;
+  gap: 16px;
+}
+
+.controls-group-fields--three {
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+}
+
+.controls-group-fields--two {
+  grid-template-columns: repeat(2, minmax(160px, 1fr));
+}
+
+.controls-group--weights .weight-box {
+  max-width: 420px;
+}
+
+.controls-hint {
+  margin: -4px 0 0;
+  color: #94a3b8;
+  font-size: 0.85rem;
 }
 
 .field {
@@ -120,7 +154,8 @@
   font-weight: 600;
 }
 
-.field select {
+.field select,
+.field input[type='number'] {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.32);
   border-radius: 12px;
@@ -128,6 +163,12 @@
   color: #edf2ff;
   padding: 12px 14px;
   font-size: 0.96rem;
+}
+
+.field-hint {
+  color: #94a3b8;
+  font-weight: 400;
+  font-size: 0.78rem;
 }
 
 .weight-box {
@@ -186,6 +227,30 @@
 .panel-header h3 {
   margin: 0;
   font-size: 1.25rem;
+}
+
+.model-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.model-tab {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.model-tab.active {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.3);
+  font-weight: 600;
 }
 
 .summary-list {
@@ -272,12 +337,93 @@
 .timeline-segment[data-compound='HARD'] { background: #e2e8f0; }
 .timeline-segment[data-compound='INTERMEDIATE'] { background: #5eead4; }
 .timeline-segment[data-compound='WET'] { background: #7dd3fc; }
+.timeline-segment[data-compound='ULTRASOFT'] { background: #c084fc; }
+.timeline-segment[data-compound='SUPERSOFT'] { background: #fb923c; }
+.timeline-segment[data-compound='HYPERSOFT'] { background: #f472b6; }
 
 .strategy-summary {
   margin: 6px 0 0;
   color: #dfe6ef;
   line-height: 1.6;
   font-size: 0.9rem;
+}
+
+.goal-targets {
+  margin-top: 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  padding-top: 16px;
+}
+
+.goal-targets h4 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+}
+
+.pit-stop-list {
+  margin-top: 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  padding-top: 16px;
+}
+
+.pit-stop-list h4 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+}
+
+.pit-stop-row {
+  display: grid;
+  grid-template-columns: 64px 64px 1fr 64px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 0.85rem;
+}
+
+.pit-stop-row:nth-child(odd) {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.pit-stop-index {
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.pit-stop-lap {
+  color: #cbd5e1;
+}
+
+.pit-stop-change {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e2e8f0;
+}
+
+.pit-stop-arrow {
+  color: #64748b;
+  margin: 0 2px;
+}
+
+.pit-stop-cost {
+  text-align: right;
+  color: #fca5a5;
+  font-weight: 600;
+}
+
+.pit-stop-total {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(251, 113, 133, 0.08);
+  border: 1px solid rgba(251, 113, 133, 0.25);
+  font-size: 0.88rem;
+}
+
+.pit-stop-total strong {
+  color: #fca5a5;
 }
 
 .stage-chip {
@@ -312,6 +458,101 @@
 .dot[data-compound='HARD'] { background: #e2e8f0; }
 .dot[data-compound='INTERMEDIATE'] { background: #2dd4bf; }
 .dot[data-compound='WET'] { background: #38bdf8; }
+.dot[data-compound='ULTRASOFT'] { background: #c084fc; }
+.dot[data-compound='SUPERSOFT'] { background: #fb923c; }
+.dot[data-compound='HYPERSOFT'] { background: #f472b6; }
+.dot[data-compound='UNKNOWN'] { background: #94a3b8; }
+
+.overview-panel {
+  padding: 28px;
+}
+
+.panel-subtitle {
+  margin: 4px 0 0;
+  color: #94a3b8;
+  font-size: 0.88rem;
+}
+
+.overview-grid {
+  margin-top: 20px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.overview-block h4 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.block-hint {
+  margin: 0 0 12px;
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+
+.bar-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 56px;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+}
+
+.bar-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #cbd5e1;
+}
+
+.bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.15);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #60a5fa;
+  min-width: 4px;
+}
+
+.bar-fill[data-compound='SOFT'] { background: #f87171; }
+.bar-fill[data-compound='MEDIUM'] { background: #facc15; }
+.bar-fill[data-compound='HARD'] { background: #e2e8f0; }
+.bar-fill[data-compound='INTERMEDIATE'] { background: #2dd4bf; }
+.bar-fill[data-compound='WET'] { background: #38bdf8; }
+.bar-fill[data-compound='ULTRASOFT'] { background: #c084fc; }
+.bar-fill[data-compound='SUPERSOFT'] { background: #fb923c; }
+.bar-fill[data-compound='HYPERSOFT'] { background: #f472b6; }
+.bar-fill[data-compound='UNKNOWN'] { background: #94a3b8; }
+
+.bar-value {
+  text-align: right;
+  color: #e2e8f0;
+  font-weight: 600;
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.chip-list .stage-chip {
+  flex: 1;
+  min-width: 140px;
+}
 
 .estimate-box {
   margin-top: 10px;
@@ -378,9 +619,11 @@
 
 @media (max-width: 900px) {
   .stats-grid,
-  .controls,
   .content-grid,
-  .comparison-grid {
+  .comparison-grid,
+  .overview-grid,
+  .controls-group-fields--three,
+  .controls-group-fields--two {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -388,11 +631,17 @@
 @media (max-width: 620px) {
   .topbar,
   .stats-grid,
-  .controls,
   .content-grid,
-  .comparison-grid {
+  .comparison-grid,
+  .overview-grid,
+  .controls-group-fields--three,
+  .controls-group-fields--two {
     grid-template-columns: 1fr;
     display: grid;
+  }
+
+  .bar-row {
+    grid-template-columns: 70px 1fr 44px;
   }
 
   .topbar {

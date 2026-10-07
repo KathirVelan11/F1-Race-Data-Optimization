@@ -37,6 +37,82 @@ class Scope2GoalSolver:
             lap_compounds[lap] = best_compound
         return lap_compounds
 
+    def _normalize_to_valid_stints(
+        self,
+        lap_compounds: Dict[int, str],
+        parameters: Scope2Parameters,
+    ) -> Dict[int, str]:
+        """Guardrail for realistic strategy generation: split any block that violates stint limits."""
+        normalized: Dict[int, str] = {}
+        current_compound = None
+        stint_start = 1
+
+        for lap in range(1, parameters.total_laps + 1):
+            compound = lap_compounds.get(lap, current_compound)
+            if current_compound is None:
+                current_compound = compound
+                stint_start = lap
+                continue
+
+            if compound != current_compound:
+                block_start = stint_start
+                block_end = lap - 1
+                block_len = block_end - block_start + 1
+                durability = parameters.max_stint_durability.get(current_compound, block_len)
+                min_length = parameters.min_stint_length
+
+                cursor = block_start
+                while cursor <= block_end:
+                    remaining = block_end - cursor + 1
+                    if remaining <= durability:
+                        chunk_end = block_end
+                    elif remaining - durability < min_length:
+                        chunk_end = block_end - min_length
+                    else:
+                        chunk_end = cursor + durability - 1
+
+                    if chunk_end < cursor:
+                        chunk_end = block_end
+
+                    for lap_idx in range(cursor, chunk_end + 1):
+                        normalized[lap_idx] = current_compound
+
+                    cursor = chunk_end + 1
+
+                current_compound = compound
+                stint_start = lap
+
+        if current_compound is not None:
+            block_start = stint_start
+            block_end = parameters.total_laps
+            block_len = block_end - block_start + 1
+            durability = parameters.max_stint_durability.get(current_compound, block_len)
+            min_length = parameters.min_stint_length
+
+            cursor = block_start
+            while cursor <= block_end:
+                remaining = block_end - cursor + 1
+                if remaining <= durability:
+                    chunk_end = block_end
+                elif remaining - durability < min_length:
+                    chunk_end = block_end - min_length
+                else:
+                    chunk_end = cursor + durability - 1
+
+                if chunk_end < cursor:
+                    chunk_end = block_end
+
+                for lap_idx in range(cursor, chunk_end + 1):
+                    normalized[lap_idx] = current_compound
+
+                cursor = chunk_end + 1
+
+        for lap in range(1, parameters.total_laps + 1):
+            if lap not in normalized:
+                normalized[lap] = lap_compounds.get(lap, parameters.compounds[0] if parameters.compounds else "SOFT")
+
+        return normalized
+
     def solve(self, parameters: Scope2Parameters) -> Scope2OptimizationResult:
         """Solve Goal Programming model minimizing weighted deviations Z."""
         start_time = time.perf_counter()
@@ -44,10 +120,11 @@ class Scope2GoalSolver:
         status = model.solve(pulp.PULP_CBC_CMD(msg=False))
         solve_duration = time.perf_counter() - start_time
 
-        if pulp.LpStatus[status] not in {"Optimal", "Not Solved"}:
+        if pulp.LpStatus[status] != "Optimal":
             raise ValueError(f"Goal programming solve failed: {pulp.LpStatus[status]}")
 
         lap_compounds = self._extract_lap_compounds(model, parameters)
+        lap_compounds = self._normalize_to_valid_stints(lap_compounds, parameters)
 
         total_time = sum(
             parameters.predicted_lap_times.get(lap, {}).get(compound, 0.0)

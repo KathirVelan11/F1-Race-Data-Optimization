@@ -21,6 +21,12 @@ async def get_dashboard_summary():
     return runner.get_dashboard_summary()
 
 
+@router.get("/dataset/overview")
+async def get_dataset_overview():
+    """Return a detailed breakdown of the combined dataset."""
+    return runner.get_dataset_overview()
+
+
 @router.get("/races/seasons")
 async def get_available_seasons():
     """Return all seasons available in the dataset."""

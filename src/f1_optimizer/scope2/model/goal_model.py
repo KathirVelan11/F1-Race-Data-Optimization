@@ -53,6 +53,12 @@ class Scope2GoalModel:
             for lap in range(1, self.params.total_laps)
         }
 
+        start = {
+            (lap, compound): pulp.LpVariable(f"s_{lap}_{compound}", lowBound=0, upBound=1, cat="Binary")
+            for lap in laps
+            for compound in compounds
+        }
+
         d1_plus = pulp.LpVariable("d1_plus", lowBound=0)
         d1_minus = pulp.LpVariable("d1_minus", lowBound=0)
         d2_plus = pulp.LpVariable("d2_plus", lowBound=0)
@@ -81,6 +87,32 @@ class Scope2GoalModel:
                 model += p[lap] >= x[(lap + 1, compound)] - x[(lap, compound)]
 
         model += total_pit_stops <= self.params.max_pit_stops
+
+        for lap in laps:
+            for compound in compounds:
+                model += start[(lap, compound)] <= x[(lap, compound)]
+
+                if lap == 1:
+                    model += start[(lap, compound)] == x[(lap, compound)]
+                else:
+                    model += start[(lap, compound)] <= 1 - x[(lap - 1, compound)]
+                    model += start[(lap, compound)] >= x[(lap, compound)] - x[(lap - 1, compound)]
+
+                min_end = min(self.params.total_laps, lap + self.params.min_stint_length - 1)
+                model += (
+                    pulp.lpSum(x[(future_lap, compound)] for future_lap in range(lap, min_end + 1))
+                    >= self.params.min_stint_length * start[(lap, compound)]
+                )
+
+                max_end = min(self.params.total_laps, lap + self.params.max_stint_durability.get(compound, self.params.total_laps))
+                model += (
+                    pulp.lpSum(x[(future_lap, compound)] for future_lap in range(lap, max_end + 1))
+                    <= self.params.max_stint_durability.get(compound, self.params.total_laps)
+                    + (self.params.total_laps + 1) * (1 - start[(lap, compound)])
+                )
+
+        for lap in laps:
+            model += pulp.lpSum(start[(lap, compound)] for compound in compounds) <= 1
 
         model += total_time + d1_minus - d1_plus == self.params.targets.target_race_time_t_star
         model += total_pit_stops + d2_minus - d2_plus == self.params.targets.target_pit_stops_p_star

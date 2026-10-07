@@ -19,8 +19,10 @@ class GoalWeights(BaseModel):
 
     @model_validator(mode="after")
     def validate_weights_sum(self) -> "GoalWeights":
-        """Verify weights are non-negative and can be normalized."""
+        """Verify weights are non-negative and sum to exactly 1 (Slide 14 convention)."""
         total = self.weight_time_w1 + self.weight_pit_stops_w2 + self.weight_degradation_w3
         if total <= 0:
             raise ValueError("Sum of goal weights must be greater than zero.")
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"Goal weights must sum to 1.0 (got {total}).")
         return self
