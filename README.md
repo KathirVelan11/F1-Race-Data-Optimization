@@ -6,18 +6,23 @@ to find and validate optimal tyre/pit decisions.
 
 ## Problem statement
 
-Given a Formula 1 race of fixed lap distance, three tyre compounds
-(Soft, Medium, Hard) each with a different degradation rate, and a
-fixed time cost per pit stop — how many pit stops should the driver
-make, on which specific laps should each stop occur, and which tyre
-compound should be fitted for each resulting stint, such that total
-race time (lap times + pit-stop time lost) is minimized?
+Given a Formula 1 race of fixed lap distance, the tyre compounds
+actually used in that race's historical data (any of Soft, Medium,
+Hard, Intermediate, Wet, plus the legacy 2018-only compounds
+Ultrasoft/Supersoft/Hypersoft), each with a different degradation
+rate, and a pit-stop time cost derived from that race/circuit's real
+pit-stop data — how many pit stops should the driver make, on which
+specific laps should each stop occur, and which tyre compound should
+be fitted for each resulting stint, such that total race time (lap
+times + pit-stop time lost) is minimized?
 
-A pit stop costs roughly 20 seconds of track time but resets tyre
-performance. Soft tyres are fastest but degrade in ~15–25 laps,
-Medium balances grip and durability (~25–40 laps), Hard lasts longest
-(~40–50+ laps) but is slowest. Strategy differences of 1–2 seconds
-have decided real race wins and championships.
+Pit-stop cost, compound durability, and compound base pace are all
+computed per-race from the real dataset rather than fixed constants —
+a pit stop at a track like Monaco costs noticeably more track time
+than one at a low-pit-loss circuit, soft compounds degrade faster
+than hard ones, and legacy 2018 compounds only appear in 2018 races.
+Strategy differences of 1–2 seconds have decided real race wins and
+championships.
 
 ## Approach
 
@@ -28,17 +33,29 @@ Two optimization models answer two related questions.
 "What's the single fastest possible strategy?" — no other
 considerations, pure minimum race time.
 
-**Sets** — `l ∈ {1,...,N}` laps; `c ∈ {S,M,H}` tyre compounds.
+**Sets** — `l ∈ {1,...,N}` laps; `c ∈ C` tyre compounds, where `C` is
+whichever compounds actually appear in that race's real data
+(typically a subset of Soft/Medium/Hard/Intermediate/Wet, or the 2018
+legacy compounds Ultrasoft/Supersoft/Hypersoft).
 
 **Decision variables**
 - `x[l,c]` ∈ {0,1} — 1 if compound `c` is used on lap `l`
 - `p[l]` ∈ {0,1} — 1 if a pit stop occurs after lap `l`
 
 **Parameters**
-- `T[l,c]` — predicted lap time on compound `c` at current tyre age
-- `P` — fixed pit-stop time loss (≈ 13 seconds)
-- `L_max[c]` — maximum durable stint length for compound `c`
+- `T[l,c]` — predicted lap time on compound `c` at current tyre age,
+  derived from real per-compound lap times for that race
+- `P` — pit-stop time loss, derived from real pit-stop durations for
+  that race (falling back to the circuit's or dataset's mean if the
+  race has too little data)
+- `L_max[c]` — maximum durable stint length for compound `c`, derived
+  from real tyre-life data for that race (falling back to the
+  dataset-wide mean)
 - `N` — total race laps
+- `max_pit_stops`, `min_stint_length` — user-adjustable inputs,
+  validated/clamped against data-derived valid ranges per race so an
+  out-of-range value (too low, too high) can't make the model
+  infeasible or unrealistic
 
 **Objective**
 
@@ -48,9 +65,9 @@ min T_race = Σ(l=1..N) T[l,c] + P · Σ(l=1..N) p[l]
 
 **Constraints**
 - exactly one compound active per lap: `Σ_c x[l,c] = 1`, ∀l
-- at most 2 pit stops per race: `Σ_l p[l] ≤ 2`
+- at most `max_pit_stops` pit stops per race: `Σ_l p[l] ≤ max_pit_stops`
 - tyre age can't exceed the compound's durability limit: `TyreAge[l,c] ≤ L_max[c]`
-- minimum stint length ≥ 5 laps
+- minimum stint length ≥ `min_stint_length` laps
 - stints must cover the full race distance: `Σ_i stint[i] = N`
 - `x[l,c], p[l] ∈ {0,1}`
 
@@ -69,11 +86,12 @@ team-assigned priority weights.
 **Additional variables**: `d1+, d1-, d2+, d2-, d3+, d3-` — deviation
 variables, how far a strategy over/under-achieves each goal.
 
-**Goals** (targets set from Model 1's result and team preference)
+**Goals** (targets set from Model 1's result and real race data)
 ```
 Goal 1 (Time):        T + d1- - d1+ = T*   (T* = fastest time, from Model 1)
-Goal 2 (Pit stops):   P + d2- - d2+ = P*   (e.g. P* = 2 stops)
-Goal 3 (Degradation): D + d3- - d3+ = D*   (target degradation rate)
+Goal 2 (Pit stops):   P + d2- - d2+ = P*   (P* = real median pit-stop count for that race,
+                                             clamped to the valid max_pit_stops range)
+Goal 3 (Degradation): D + d3- - d3+ = D*   (target degradation index)
 ```
 
 **Objective**
@@ -87,27 +105,36 @@ exchange for fewer pit stops / lower tyre degradation, per the team's
 weights. e.g. Model 1 → 1:28:33.2, Model 2 → 1:28:35.1 (+1.9s, same
 stints, adjusted timing).
 
-## Planned interface
+## Interface
 
-- Load race data, generate statistics on demand (tyre degradation
-  curves, pit-stop cost breakdowns)
-- User chooses which model to run: Model 1 (fastest) or Model 2
-  (balanced)
-- Output: recommended pit laps + compound per stint, and predicted
-  race time
+- React/Vite frontend talking to a FastAPI backend (see `frontend/`
+  and `backend/`)
+- Dataset overview panel: races per year, compound usage, mean max
+  stint life per compound, pit-stop stats — generated on demand from
+  the real dataset
+- User picks season/race/driver, sets strategy constraints
+  (max pit stops, min stint length) within data-derived valid ranges,
+  and tunes Model 2's goal-priority weights (must sum to 1)
+- Tabs for Model 1 (fastest strategy) and Model 2 (balanced strategy),
+  each showing the recommended pit laps, compound per stint, a
+  pit-stop-by-stop breakdown, and predicted race time (Model 2 also
+  shows its goal targets)
 
 ## Validation
 
-Predicted race time is compared against the actual race result
-(Kaggle `results.csv`) to report prediction accuracy.
+`scripts/validate_models.py` runs both models across all 148 races in
+the dataset and sanity-checks the solver output (lap coverage, stint
+validity, solver status). `scripts/compare_to_real.py` re-solves both
+models per race and compares the predicted strategy/time against the
+real fastest finisher's actual strategy/time for that race.
 
 ## Status
 
 - [x] Data collection & merge pipeline (`scripts/build_dataset.py`)
-- [ ] Model 1 — MILP tyre/pit-stop optimizer
-- [ ] Model 2 — Goal Programming balanced strategy
-- [ ] Interface
-- [ ] Validation against actual race results
+- [x] Model 1 — MILP tyre/pit-stop optimizer
+- [x] Model 2 — Goal Programming balanced strategy
+- [x] Interface (FastAPI backend + React/Vite frontend)
+- [x] Validation against actual race results (`scripts/validate_models.py`, `scripts/compare_to_real.py`)
 
 ## Data
 
