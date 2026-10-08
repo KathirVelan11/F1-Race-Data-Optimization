@@ -599,27 +599,33 @@ function App() {
             </div>
           </div>
 
-          <div className="controls-group controls-group--weights">
-            <h4 className="controls-group-title">Goal priorities (Model 2)</h4>
-            <div className="weight-box">
-              <div className="weight-row">
-                <span>Time</span>
-                <strong>{weights.weight_time_w1.toFixed(2)}</strong>
+          {activeModelTab === 'model2' && (
+            <div className="controls-group controls-group--weights">
+              <h4 className="controls-group-title">Goal priorities (Model 2 only)</h4>
+              <p className="block-hint">
+                Model 1 has a single objective (minimize race time) and no priorities to set.
+                These weights only affect Model 2's balanced strategy.
+              </p>
+              <div className="weight-box">
+                <div className="weight-row">
+                  <span>Time</span>
+                  <strong>{weights.weight_time_w1.toFixed(2)}</strong>
+                </div>
+                <input type="range" min="0" max="1" step="0.05" value={weights.weight_time_w1} onChange={(event) => updateWeight('weight_time_w1', Number(event.target.value))} />
+                <div className="weight-row">
+                  <span>Pit stops</span>
+                  <strong>{weights.weight_pit_stops_w2.toFixed(2)}</strong>
+                </div>
+                <input type="range" min="0" max="1" step="0.05" value={weights.weight_pit_stops_w2} onChange={(event) => updateWeight('weight_pit_stops_w2', Number(event.target.value))} />
+                <div className="weight-row">
+                  <span>Degradation</span>
+                  <strong>{weights.weight_degradation_w3.toFixed(2)}</strong>
+                </div>
+                <input type="range" min="0" max="1" step="0.05" value={weights.weight_degradation_w3} onChange={(event) => updateWeight('weight_degradation_w3', Number(event.target.value))} />
+                <small className="field-hint">Always sums to 1.00 &mdash; adjusting one rescales the others.</small>
               </div>
-              <input type="range" min="0" max="1" step="0.05" value={weights.weight_time_w1} onChange={(event) => updateWeight('weight_time_w1', Number(event.target.value))} />
-              <div className="weight-row">
-                <span>Pit stops</span>
-                <strong>{weights.weight_pit_stops_w2.toFixed(2)}</strong>
-              </div>
-              <input type="range" min="0" max="1" step="0.05" value={weights.weight_pit_stops_w2} onChange={(event) => updateWeight('weight_pit_stops_w2', Number(event.target.value))} />
-              <div className="weight-row">
-                <span>Degradation</span>
-                <strong>{weights.weight_degradation_w3.toFixed(2)}</strong>
-              </div>
-              <input type="range" min="0" max="1" step="0.05" value={weights.weight_degradation_w3} onChange={(event) => updateWeight('weight_degradation_w3', Number(event.target.value))} />
-              <small className="field-hint">Always sums to 1.00 &mdash; adjusting one rescales the others.</small>
             </div>
-          </div>
+          )}
 
           <button type="button" className="primary-button" onClick={runStrategyPreview} disabled={loading}>
             {loading ? 'Generating...' : 'Generate strategy comparison'}
