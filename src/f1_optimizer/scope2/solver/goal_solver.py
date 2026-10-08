@@ -15,8 +15,23 @@ from src.f1_optimizer.scope2.parameters.scope2_parameters import Scope2Parameter
 class Scope2GoalSolver:
     """Invokes solver for the Goal Programming model."""
 
-    def __init__(self, solver_name: str = "PULP_CBC_CMD"):
+    def __init__(self, solver_name: str = "HiGHS", time_limit_seconds: int = 20):
+        """`solver_name` selects the backend ("HiGHS" or "PULP_CBC_CMD"). HiGHS is the
+        default: it's free (no license), and in practice noticeably faster than CBC on
+        this project's MILP/Goal-Programming models, especially the larger risk-tier
+        formulation (age-tracking adds a lot of binary variables).
+
+        `time_limit_seconds` caps how long the solver searches: a strategy that's merely
+        very good (but not provably optimal) returned in a bounded time is far more
+        useful to a user than making them wait indefinitely for a proof of optimality.
+        """
         self.solver_name = solver_name
+        self.time_limit_seconds = time_limit_seconds
+
+    def _build_solver(self) -> Any:
+        if self.solver_name == "HiGHS":
+            return pulp.HiGHS(msg=False, timeLimit=self.time_limit_seconds)
+        return pulp.PULP_CBC_CMD(msg=False, timeLimit=self.time_limit_seconds)
 
     def _extract_lap_compounds(self, model: Any, parameters: Scope2Parameters) -> Dict[int, str]:
         """Extract the selected compound for each lap from the solved model."""
@@ -117,11 +132,23 @@ class Scope2GoalSolver:
         """Solve Goal Programming model minimizing weighted deviations Z."""
         start_time = time.perf_counter()
         model = Scope2GoalModel(parameters).build()
-        status = model.solve(pulp.PULP_CBC_CMD(msg=False))
+        status = model.solve(self._build_solver())
         solve_duration = time.perf_counter() - start_time
 
-        if pulp.LpStatus[status] != "Optimal":
+        # A time-limited solve that still found a usable integer-feasible solution
+        # reports "Not Solved" (optimality unproven) rather than "Optimal" -- that's an
+        # acceptable, real answer (just not provably the best possible one), so it's
+        # accepted here as long as the decision variables actually have values; only a
+        # genuinely infeasible/undefined model is rejected.
+        accepted_statuses = {"Optimal", "Not Solved"}
+        if pulp.LpStatus[status] not in accepted_statuses:
             raise ValueError(f"Goal programming solve failed: {pulp.LpStatus[status]}")
+        if pulp.value(model.variablesDict().get("d1_plus")) is None:
+            raise ValueError(
+                f"Goal programming solve hit its {self.time_limit_seconds}s time limit "
+                "without finding any feasible solution. Try relaxing constraints "
+                "(lower min pit stops, more tyre sets) or increasing the time limit."
+            )
 
         lap_compounds = self._extract_lap_compounds(model, parameters)
         lap_compounds = self._normalize_to_valid_stints(lap_compounds, parameters)
@@ -138,9 +165,7 @@ class Scope2GoalSolver:
             )
             + parameters.pit_loss_p * total_pit_stops
         )
-        degradation_index = sum(
-            parameters.compound_degradations.get(compound, 0.0) for _, compound in lap_compounds.items()
-        ) / parameters.total_laps
+        risk_score = self._compute_risk_score(lap_compounds, parameters)
 
         stints: List[StintPlan] = []
         current_compound = lap_compounds[1]
@@ -197,6 +222,8 @@ class Scope2GoalSolver:
             + parameters.weights.weight_degradation_w3 * deviations.d3_plus
         )
 
+        reported_status = "Optimal" if pulp.LpStatus[status] == "Optimal" else "Best found (time limit reached)"
+
         return Scope2OptimizationResult(
             balanced_race_time_seconds=total_time,
             time_delta_vs_fastest_seconds=total_time - parameters.targets.target_race_time_t_star,
@@ -204,7 +231,45 @@ class Scope2GoalSolver:
             optimal_pit_laps=[lap for lap in range(1, parameters.total_laps) if pulp.value(model.variablesDict()[f"p_{lap}"]) > 0.5],
             stints=stints,
             deviations=deviations,
+            risk_score=risk_score,
             objective_value_z=objective_value,
-            solver_status=pulp.LpStatus[status],
+            solver_status=reported_status,
             solve_duration_seconds=solve_duration,
         )
+
+    @staticmethod
+    def _compute_risk_score(lap_compounds: Dict[int, str], parameters: Scope2Parameters) -> float:
+        """Recompute the strategy's total degradation-risk score from the final,
+        normalized stint sequence. Tracks each compound's real tyre age lap by lap
+        (resetting to 1 whenever the compound changes) and sums the risk-tier weight
+        (0=low..3=very high) that age falls into, scaled to that compound's durability.
+
+        This mirrors the MILP's age/tier logic but computed directly from the final
+        lap-by-lap sequence rather than via decision variables, since the sequence is
+        already fully determined at this point.
+        """
+        total_laps = parameters.total_laps
+        total_risk = 0.0
+        current_compound = None
+        age = 0
+
+        for lap in range(1, total_laps + 1):
+            compound = lap_compounds.get(lap)
+            if compound is None:
+                continue
+            age = age + 1 if compound == current_compound else 1
+            current_compound = compound
+
+            t1, t2, t3 = parameters.risk_tiers.get(
+                compound, [max(1, total_laps // 3), max(2, total_laps * 2 // 3), max(3, total_laps * 9 // 10)]
+            )
+            if age <= t1:
+                total_risk += 0
+            elif age <= t2:
+                total_risk += 1
+            elif age <= t3:
+                total_risk += 2
+            else:
+                total_risk += 3
+
+        return total_risk

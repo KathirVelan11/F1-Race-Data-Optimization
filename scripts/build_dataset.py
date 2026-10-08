@@ -89,8 +89,53 @@ merged_final = merged[final_cols].rename(columns={
     'code': 'Driver', 'time': 'LapTime', 'position': 'Position', 'lap': 'Lap', 'year': 'Year'
 })
 
+# Dry-race scope: this project only models dry-condition strategy with the three
+# standard dry compounds (Soft/Medium/Hard). A race that used WET/INTERMEDIATE at any
+# point, or any legacy 2018 compound name (ULTRASOFT/SUPERSOFT/HYPERSOFT), is dropped
+# entirely rather than just filtering out the offending laps -- a partially-wet race's
+# remaining dry laps don't represent a realistic standalone dry strategy.
+DRY_COMPOUNDS = {'SOFT', 'MEDIUM', 'HARD'}
+merged_final['_CompoundUpper'] = merged_final['Compound'].astype(str).str.upper()
+
+compound_sets_per_race = merged_final.groupby(['Year', 'Race'])['_CompoundUpper'].apply(
+    lambda s: set(s.unique())
+)
+races_before = compound_sets_per_race.shape[0]
+dry_race_keys = compound_sets_per_race[
+    compound_sets_per_race.apply(lambda s: s <= (DRY_COMPOUNDS | {'NAN', 'UNKNOWN'}))
+].index
+
+dropped = compound_sets_per_race.drop(index=dry_race_keys)
+merged_final = merged_final[
+    merged_final.set_index(['Year', 'Race']).index.isin(dry_race_keys)
+]
+
+# Some "dry" races are near-empty data stubs (e.g. 2021 Belgian GP: red-flagged
+# immediately, only one UNKNOWN-compound lap per driver ever recorded -- technically
+# satisfies the dry-compound-only filter above since UNKNOWN is excluded from it, but
+# has zero actual SOFT/MEDIUM/HARD laps to learn from). Drop any race with no real dry
+# laps left after excluding NAN/UNKNOWN rows.
+real_dry_laps = merged_final[merged_final['_CompoundUpper'].isin(DRY_COMPOUNDS)]
+races_with_real_dry_data = real_dry_laps.groupby(['Year', 'Race']).size()
+empty_stub_races = merged_final.set_index(['Year', 'Race']).index.unique().difference(
+    races_with_real_dry_data.index
+)
+if len(empty_stub_races):
+    merged_final = merged_final[~merged_final.set_index(['Year', 'Race']).index.isin(empty_stub_races)]
+
+merged_final = merged_final.drop(columns=['_CompoundUpper'])
+
 output_path = os.path.join(PROCESSED_DIR, 'combined_dataset.csv')
 merged_final.to_csv(output_path, index=False)
+if len(empty_stub_races):
+    print(f"\nDropped {len(empty_stub_races)} near-empty data stub race(s) with no real "
+          f"SOFT/MEDIUM/HARD laps: {list(empty_stub_races)}")
+print(f"\nDry-race filter: kept {len(dry_race_keys) - len(empty_stub_races)}/{races_before} races "
+      f"(dropped {len(dropped)} using WET/INTERMEDIATE/legacy compounds)")
+if len(dropped):
+    print("Dropped races (year, race, compounds used):")
+    for (year, race), compounds in dropped.items():
+        print(f"  {year} {race}: {sorted(str(c) for c in compounds)}")
 print(f"\nSaved: {output_path}")
 print(f"Rows: {len(merged_final):,}")
 print(f"Columns: {list(merged_final.columns)}")

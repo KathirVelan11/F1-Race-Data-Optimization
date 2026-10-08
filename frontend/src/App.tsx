@@ -50,14 +50,17 @@ type StrategyPreview = {
   solver_status?: string
   objective_value_z?: number
   pit_loss_seconds?: number
-  max_pit_stops?: number
+  min_pit_stops?: number
   min_stint_length?: number
-  max_pit_stops_valid_range?: [number, number]
+  min_pit_stops_valid_range?: [number, number]
   min_stint_length_valid_range?: [number, number]
+  max_sets_per_compound?: Record<string, number>
+  max_sets_per_compound_valid_range?: Record<string, [number, number]>
+  risk_score?: number
   targets?: {
     target_race_time_seconds: number
     target_pit_stops: number
-    target_degradation_index: number
+    target_risk_score: number
   }
 }
 
@@ -94,10 +97,70 @@ function App() {
   const [comparison, setComparison] = useState<ComparisonResult | null>(null)
   const [weights, setWeights] = useState<GoalWeights>(DEFAULT_WEIGHTS)
   const [loading, setLoading] = useState(false)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [activeModelTab, setActiveModelTab] = useState<'model1' | 'model2'>('model1')
   const [overview, setOverview] = useState<DatasetOverview | null>(null)
-  const [maxPitStopsInput, setMaxPitStopsInput] = useState<string>('')
+  const [minPitStopsInput, setMinPitStopsInput] = useState<string>('')
   const [minStintLengthInput, setMinStintLengthInput] = useState<string>('')
+  const [maxSoftSetsInput, setMaxSoftSetsInput] = useState<string>('')
+  const [maxMediumSetsInput, setMaxMediumSetsInput] = useState<string>('')
+  const [maxHardSetsInput, setMaxHardSetsInput] = useState<string>('')
+
+  const MAX_REASONABLE_SETS = 20
+
+  // Parses one numeric input field. Every field here is required -- a blank value is
+  // always an error, never silently treated as 0, so the Generate button stays disabled
+  // until the user has explicitly entered all four values. Also flags every other edge
+  // case this field could realistically hit: negative numbers, non-integer/garbage text,
+  // and absurdly large values that are almost certainly a typo.
+  const parseSetCount = (raw: string, label: string): { value: number; error: string | null } => {
+    const trimmed = raw.trim()
+    if (trimmed === '') return { value: 0, error: `${label}: required, please enter a value.` }
+
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed)) {
+      return { value: 0, error: `${label}: enter a number.` }
+    }
+    if (!Number.isInteger(parsed)) {
+      return { value: 0, error: `${label}: must be a whole number (no fractional tyre sets).` }
+    }
+    if (parsed < 0) {
+      return { value: 0, error: `${label}: cannot be negative.` }
+    }
+    if (parsed > MAX_REASONABLE_SETS) {
+      return { value: 0, error: `${label}: ${parsed} seems too high (max realistic value is ${MAX_REASONABLE_SETS}). Double-check this.` }
+    }
+    return { value: parsed, error: null }
+  }
+
+  const tyreSetValidation = useMemo(() => {
+    const soft = parseSetCount(maxSoftSetsInput, 'Soft sets')
+    const medium = parseSetCount(maxMediumSetsInput, 'Medium sets')
+    const hard = parseSetCount(maxHardSetsInput, 'Hard sets')
+    const pitStops = parseSetCount(minPitStopsInput, 'Min pit stops')
+
+    const fieldErrors = [soft.error, medium.error, hard.error, pitStops.error].filter(
+      (error): error is string => error !== null
+    )
+
+    const totalSets = soft.value + medium.value + hard.value
+    const stintsNeeded = pitStops.value + 1
+    const feasibilityError =
+      fieldErrors.length === 0 && totalSets < stintsNeeded
+        ? `Not enough tyre sets: ${totalSets} entered (Soft ${soft.value} + Medium ${medium.value} + Hard ${hard.value}), ` +
+          `but min pit stops = ${pitStops.value} needs at least ${stintsNeeded} stints. ` +
+          `Add ${stintsNeeded - totalSets} more set(s), or lower min pit stops.`
+        : null
+
+    const allErrors = feasibilityError ? [...fieldErrors, feasibilityError] : fieldErrors
+
+    return {
+      isValid: allErrors.length === 0,
+      errors: allErrors,
+      totalSets,
+      stintsNeeded,
+    }
+  }, [maxSoftSetsInput, maxMediumSetsInput, maxHardSetsInput, minPitStopsInput])
 
   useEffect(() => {
     const loadDashboard = async () => {
@@ -178,14 +241,35 @@ function App() {
     loadSummary()
   }, [selectedYear, selectedRace, selectedDriver])
 
+  // Ticking elapsed-time display while a solve is in flight. CBC runs as a black-box
+  // subprocess with no real progress to stream back (no iteration count or % complete
+  // is available), so this is honestly just "how long you've been waiting," not a
+  // progress bar -- but it's enough to show the request is alive, not frozen.
+  useEffect(() => {
+    if (!loading) {
+      setElapsedSeconds(0)
+      return
+    }
+    const start = Date.now()
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - start) / 1000))
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [loading])
+
   const renderStrategyCard = (title: string, payload: StrategyPreview | null, highlight: 'fastest' | 'balanced') => {
     if (!payload || payload.strategy.length === 0) {
+      const isValidationIssue = Boolean(payload?.message && payload.message !== 'Unable to generate strategy comparison.')
       return (
         <article className="card info-panel">
           <div className="panel-header">
             <h3>{title}</h3>
           </div>
-          <p className="empty-state">No {title.toLowerCase()} strategy available yet.</p>
+          {isValidationIssue ? (
+            <p className="empty-state empty-state--error">{payload!.message}</p>
+          ) : (
+            <p className="empty-state">No {title.toLowerCase()} strategy available yet.</p>
+          )}
         </article>
       )
     }
@@ -271,7 +355,10 @@ function App() {
               <div className="summary-list">
                 <div><span>Target race time (T*)</span><strong>{payload.targets.target_race_time_seconds.toFixed(1)}s</strong></div>
                 <div><span>Target pit stops (P*)</span><strong>{payload.targets.target_pit_stops}</strong></div>
-                <div><span>Target degradation (D*)</span><strong>{payload.targets.target_degradation_index.toFixed(2)}</strong></div>
+                <div><span>Target risk score (R*)</span><strong>{payload.targets.target_risk_score.toFixed(1)}</strong></div>
+                {payload.risk_score !== undefined && (
+                  <div><span>Achieved risk score</span><strong>{payload.risk_score.toFixed(1)}</strong></div>
+                )}
               </div>
             </div>
           )}
@@ -351,8 +438,13 @@ function App() {
     if (!selectedYear || !selectedRace) return
     setLoading(true)
     try {
-      const maxPitStops = maxPitStopsInput.trim() === '' ? undefined : Number(maxPitStopsInput)
+      const minPitStops = minPitStopsInput.trim() === '' ? undefined : Number(minPitStopsInput)
       const minStintLength = minStintLengthInput.trim() === '' ? undefined : Number(minStintLengthInput)
+
+      const maxSetsPerCompound: Record<string, number> = {}
+      if (maxSoftSetsInput.trim() !== '') maxSetsPerCompound.SOFT = Number(maxSoftSetsInput)
+      if (maxMediumSetsInput.trim() !== '') maxSetsPerCompound.MEDIUM = Number(maxMediumSetsInput)
+      if (maxHardSetsInput.trim() !== '') maxSetsPerCompound.HARD = Number(maxHardSetsInput)
 
       const response = await fetch(`${API_BASE}/compare`, {
         method: 'POST',
@@ -362,8 +454,9 @@ function App() {
           race_name: selectedRace,
           driver_code: selectedDriver || undefined,
           weights,
-          max_pit_stops: maxPitStops,
+          min_pit_stops: minPitStops,
           min_stint_length: minStintLength,
+          max_sets_per_compound: Object.keys(maxSetsPerCompound).length ? maxSetsPerCompound : undefined,
         }),
       })
 
@@ -522,6 +615,25 @@ function App() {
           </section>
         )}
 
+        <section className="card model-select-panel">
+          <div className="model-tabs">
+            <button
+              type="button"
+              className={activeModelTab === 'model1' ? 'model-tab active' : 'model-tab'}
+              onClick={() => setActiveModelTab('model1')}
+            >
+              Model 1 - Fastest (MILP)
+            </button>
+            <button
+              type="button"
+              className={activeModelTab === 'model2' ? 'model-tab active' : 'model-tab'}
+              onClick={() => setActiveModelTab('model2')}
+            >
+              Model 2 - Balanced (Goal Programming)
+            </button>
+          </div>
+        </section>
+
         <section className="controls card">
           <div className="controls-group">
             <h4 className="controls-group-title">Race selection</h4>
@@ -560,21 +672,21 @@ function App() {
             <h4 className="controls-group-title">Strategy constraints</h4>
             <div className="controls-group-fields controls-group-fields--two">
               <div className="field">
-                <label htmlFor="max-pit-stops">
-                  Max pit stops
-                  {comparison?.scope1?.max_pit_stops_valid_range && (
+                <label htmlFor="min-pit-stops">
+                  Min pit stops
+                  {comparison?.scope1?.min_pit_stops_valid_range && (
                     <small className="field-hint">
-                      {' '}(valid {comparison.scope1.max_pit_stops_valid_range[0]}-{comparison.scope1.max_pit_stops_valid_range[1]})
+                      {' '}(typically {comparison.scope1.min_pit_stops_valid_range[0]}-{comparison.scope1.min_pit_stops_valid_range[1]})
                     </small>
                   )}
                 </label>
                 <input
-                  id="max-pit-stops"
+                  id="min-pit-stops"
                   type="number"
-                  min={1}
-                  placeholder="Auto (data-driven)"
-                  value={maxPitStopsInput}
-                  onChange={(event) => setMaxPitStopsInput(event.target.value)}
+                  min={0}
+                  placeholder="Required"
+                  value={minPitStopsInput}
+                  onChange={(event) => setMinPitStopsInput(event.target.value)}
                 />
               </div>
 
@@ -594,6 +706,74 @@ function App() {
                   placeholder="Auto (data-driven)"
                   value={minStintLengthInput}
                   onChange={(event) => setMinStintLengthInput(event.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="controls-group">
+            <h4 className="controls-group-title">Tyre set allocation</h4>
+            <p className="block-hint">
+              How many sets of each compound you have available this weekend. All three
+              fields are required (enter 0 if a compound isn't available). The total
+              across all three must cover at least min pit stops + 1 stints, or the run
+              will fail with an explanation.
+            </p>
+            <div className="controls-group-fields controls-group-fields--three">
+              <div className="field">
+                <label htmlFor="max-soft-sets">
+                  Soft sets
+                  {comparison?.scope1?.max_sets_per_compound_valid_range?.SOFT && (
+                    <small className="field-hint">
+                      {' '}(typically {comparison.scope1.max_sets_per_compound_valid_range.SOFT[0]}-{comparison.scope1.max_sets_per_compound_valid_range.SOFT[1]})
+                    </small>
+                  )}
+                </label>
+                <input
+                  id="max-soft-sets"
+                  type="number"
+                  min={0}
+                  placeholder="Required"
+                  value={maxSoftSetsInput}
+                  onChange={(event) => setMaxSoftSetsInput(event.target.value)}
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="max-medium-sets">
+                  Medium sets
+                  {comparison?.scope1?.max_sets_per_compound_valid_range?.MEDIUM && (
+                    <small className="field-hint">
+                      {' '}(typically {comparison.scope1.max_sets_per_compound_valid_range.MEDIUM[0]}-{comparison.scope1.max_sets_per_compound_valid_range.MEDIUM[1]})
+                    </small>
+                  )}
+                </label>
+                <input
+                  id="max-medium-sets"
+                  type="number"
+                  min={0}
+                  placeholder="Required"
+                  value={maxMediumSetsInput}
+                  onChange={(event) => setMaxMediumSetsInput(event.target.value)}
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="max-hard-sets">
+                  Hard sets
+                  {comparison?.scope1?.max_sets_per_compound_valid_range?.HARD && (
+                    <small className="field-hint">
+                      {' '}(typically {comparison.scope1.max_sets_per_compound_valid_range.HARD[0]}-{comparison.scope1.max_sets_per_compound_valid_range.HARD[1]})
+                    </small>
+                  )}
+                </label>
+                <input
+                  id="max-hard-sets"
+                  type="number"
+                  min={0}
+                  placeholder="Required"
+                  value={maxHardSetsInput}
+                  onChange={(event) => setMaxHardSetsInput(event.target.value)}
                 />
               </div>
             </div>
@@ -627,10 +807,28 @@ function App() {
             </div>
           )}
 
-          <button type="button" className="primary-button" onClick={runStrategyPreview} disabled={loading}>
-            {loading ? 'Generating...' : 'Generate strategy comparison'}
+          {tyreSetValidation.errors.length > 0 && (
+            <div className="validation-panel">
+              {tyreSetValidation.errors.map((error) => (
+                <p key={error} className="validation-error">{error}</p>
+              ))}
+            </div>
+          )}
+
+          <button
+            type="button"
+            className="primary-button"
+            onClick={runStrategyPreview}
+            disabled={loading || !tyreSetValidation.isValid}
+          >
+            {loading ? `Generating... ${elapsedSeconds}s` : 'Generate strategy comparison'}
           </button>
-          {!comparison && !loading && (
+          {loading && (
+            <p className="controls-hint">
+              Solving both models (this can take a while for complex races) &mdash; the page is still working.
+            </p>
+          )}
+          {!comparison && !loading && tyreSetValidation.isValid && (
             <p className="controls-hint">Select a race above and click Generate to run both models.</p>
           )}
         </section>
@@ -654,22 +852,6 @@ function App() {
           </article>
 
           <article className="card info-panel model-tabs-panel">
-            <div className="model-tabs">
-              <button
-                type="button"
-                className={activeModelTab === 'model1' ? 'model-tab active' : 'model-tab'}
-                onClick={() => setActiveModelTab('model1')}
-              >
-                Model 1 - Fastest (MILP)
-              </button>
-              <button
-                type="button"
-                className={activeModelTab === 'model2' ? 'model-tab active' : 'model-tab'}
-                onClick={() => setActiveModelTab('model2')}
-              >
-                Model 2 - Balanced (Goal Programming)
-              </button>
-            </div>
             {activeModelTab === 'model1'
               ? renderStrategyCard('Fastest strategy', comparison?.scope1 ?? strategy, 'fastest')
               : renderStrategyCard('Balanced strategy', comparison?.scope2 ?? null, 'balanced')}

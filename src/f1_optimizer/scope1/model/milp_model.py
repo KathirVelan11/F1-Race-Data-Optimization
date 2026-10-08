@@ -5,15 +5,19 @@ Objective:
 
 Constraints:
     (a) sum_c x_{l,c} = 1                    forall l in {1, ..., N}
-    (b) sum_{l=1}^N p_l <= 2
+    (b) sum_{l=1}^N p_l >= min_pit_stops     (user must pit at least this many times)
     (c) TyreAge_{l,c} <= L_c^max            forall l, c
-    (d) stint length >= 5
+    (d) stint length >= min_stint_length
     (e) sum_i stint_i = N
     (f) x_{l,c} in {0,1}, p_l in {0,1}
+    (g) sum_l start_{l,c} <= max_sets_c      forall c (tyre-set allocation limit --
+                                               this is the real-world ceiling on pit
+                                               stops, since each stint consumes one set)
 
 Decision Variables:
     x_{l,c} = 1 if compound c is used on lap l, 0 otherwise
     p_l = 1 if a pit stop occurs after lap l, 0 otherwise
+    start_{l,c} = 1 if a new stint on compound c begins on lap l, 0 otherwise
 """
 from typing import Any
 
@@ -83,7 +87,7 @@ class Scope1MilpModel:
                 model += p[lap] >= x[(lap, compound)] - x[(lap + 1, compound)]
                 model += p[lap] >= x[(lap + 1, compound)] - x[(lap, compound)]
 
-        model += pulp.lpSum(p.values()) <= self.params.max_pit_stops
+        model += pulp.lpSum(p.values()) >= self.params.min_pit_stops
 
         for lap in laps:
             for compound in compounds:
@@ -111,6 +115,12 @@ class Scope1MilpModel:
 
         for lap in laps:
             model += pulp.lpSum(start[(lap, compound)] for compound in compounds) <= 1
+
+        for compound in compounds:
+            model += (
+                pulp.lpSum(start[(lap, compound)] for lap in laps)
+                <= self.params.max_sets_per_compound.get(compound, self.params.total_laps)
+            )
 
         self._model = model
         return model

@@ -78,15 +78,24 @@ class BackendOptimizationRunner:
         self,
         race_df: "pd.DataFrame",
         total_laps: int,
-        requested_max_pit_stops: Optional[int] = None,
+        requested_min_pit_stops: Optional[int] = None,
         requested_min_stint_length: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Resolve max_pit_stops / min_stint_length from optional user input, defaulting to
-        and validating against this race's real data so a bad input (e.g. 0 or 100) can
-        never make the solver infeasible.
+        """Resolve min_pit_stops / min_stint_length from optional user input.
 
-        Returns the resolved values plus the data-driven bounds, so the UI can show the
-        user what range is actually valid and why their input was adjusted, if it was.
+        min_pit_stops follows the same exact-value rule as max_sets_per_compound: the
+        user's entered value is used exactly (clamped only to be non-negative), and
+        blank means 0 (no minimum pit-stop requirement). There is no data-driven default
+        and no silent clamping -- if the entered value turns out to be infeasible given
+        the race's other constraints (tyre sets, durability), that surfaces as a clear
+        rejection rather than being quietly adjusted.
+
+        min_stint_length keeps its original data-driven-default behavior (defaults to the
+        race's real 5th-percentile stint length when blank, clamped to a valid range when
+        entered) -- that part of the design wasn't changed.
+
+        `valid_range` for min_pit_stops is informational only (a hint derived from real
+        per-driver pit counts in this race), not an enforced bound.
         """
         stint_lengths = (
             race_df.dropna(subset=["Stint", "TyreLife"])
@@ -97,30 +106,76 @@ class BackendOptimizationRunner:
             race_df.dropna(subset=["Stint"]).groupby("Driver")["Stint"].max() - 1
         )
 
-        # Max pit stops: default to the race's observed 90th percentile (rounded up),
-        # floor 1, so the solver always has room for at least one real strategy choice.
-        default_max_pit_stops = max(1, int(real_pit_counts.quantile(0.9)) if not real_pit_counts.empty else 2)
-        upper_bound_pit_stops = max(default_max_pit_stops, int(real_pit_counts.max()) if not real_pit_counts.empty else 4, 1)
-        if requested_max_pit_stops is None:
-            max_pit_stops = default_max_pit_stops
-        else:
-            max_pit_stops = max(1, min(int(requested_max_pit_stops), upper_bound_pit_stops))
+        # Informational hint range only -- real per-driver pit counts observed in this race.
+        hint_default = max(1, int(real_pit_counts.quantile(0.1)) if not real_pit_counts.empty else 1)
+        hint_upper = max(hint_default, int(real_pit_counts.max()) if not real_pit_counts.empty else 4, 1)
+
+        min_pit_stops = max(0, int(requested_min_pit_stops)) if requested_min_pit_stops is not None else 0
 
         # Min stint length: default to a conservative floor below which almost no real
         # stint falls (5th percentile), never above what total_laps/stint-count allows.
         observed_min = int(stint_lengths.quantile(0.05)) if not stint_lengths.empty else 3
         default_min_stint_length = max(1, min(observed_min, 5))
-        upper_bound_stint_length = max(1, total_laps // max(1, max_pit_stops + 1))
+        upper_bound_stint_length = max(1, total_laps // max(1, min_pit_stops + 1))
         if requested_min_stint_length is None:
             min_stint_length = min(default_min_stint_length, upper_bound_stint_length)
         else:
             min_stint_length = max(1, min(int(requested_min_stint_length), upper_bound_stint_length))
 
         return {
-            "max_pit_stops": max_pit_stops,
+            "min_pit_stops": min_pit_stops,
             "min_stint_length": min_stint_length,
-            "max_pit_stops_valid_range": [1, upper_bound_pit_stops],
+            "min_pit_stops_valid_range": [0, hint_upper],
             "min_stint_length_valid_range": [1, upper_bound_stint_length],
+        }
+
+    @staticmethod
+    def _resolve_max_sets_per_compound(
+        race_df: "pd.DataFrame",
+        compounds: List[str],
+        min_pit_stops: int,
+        requested: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve how many separate stints (tyre sets) are allowed per compound.
+
+        Real F1 teams have a limited allocation of each compound for a race weekend --
+        this models that as a per-compound cap on stint count. The user's entered value is
+        used exactly as given (clamped only to be non-negative -- a negative set count is
+        meaningless); a compound the user left blank is treated as 0 sets available, i.e.
+        that compound cannot be used at all. There is no silent auto-correction: if the
+        entered counts can't cover the race (too few total stints for min_pit_stops+1,
+        the minimum number of stints a strategy meeting the pit-stop floor requires), that
+        surfaces as a clear rejection rather than being quietly bumped up.
+
+        `valid_ranges` is informational only (shown in the UI as a hint derived from real
+        per-driver stint counts on that compound in this race) -- it does not constrain
+        what the user can actually enter.
+        """
+        stints_per_compound_driver = (
+            race_df.dropna(subset=["Stint", "Compound"])
+            .assign(Compound=lambda d: d["Compound"].astype(str).str.upper())
+            .groupby(["Driver", "Compound"])["Stint"]
+            .nunique()
+        )
+
+        total_stints_needed = min_pit_stops + 1
+        resolved: Dict[str, int] = {}
+        valid_ranges: Dict[str, List[int]] = {}
+
+        for compound in compounds:
+            real_counts = stints_per_compound_driver.xs(compound, level="Compound", drop_level=True) \
+                if compound in stints_per_compound_driver.index.get_level_values("Compound") else None
+            hint_default = max(1, int(real_counts.quantile(0.9)) if real_counts is not None and not real_counts.empty else 2)
+            hint_upper = max(hint_default, total_stints_needed, int(real_counts.max()) if real_counts is not None and not real_counts.empty else total_stints_needed)
+            valid_ranges[compound] = [1, hint_upper]
+
+            requested_value = (requested or {}).get(compound)
+            resolved[compound] = max(0, int(requested_value)) if requested_value is not None else 0
+
+        return {
+            "max_sets_per_compound": resolved,
+            "max_sets_per_compound_valid_range": valid_ranges,
+            "max_sets_per_compound_feasible": sum(resolved.values()) >= total_stints_needed,
         }
 
     def _get_max_stint_durability(
@@ -137,10 +192,10 @@ class BackendOptimizationRunner:
         global average), falling back to the dataset-wide mean for compounds without
         enough race-specific stint data.
 
-        `max_stints` is max_pit_stops + 1 for whatever max_pit_stops the solver will
-        actually use (which may be user-supplied) -- the floor below must match that
-        exact stint count, otherwise a durability guarantee sized for 3 stints can make
-        the solver infeasible when the user requests fewer stops (less room per stint).
+        `max_stints` is min_pit_stops + 1, the minimum stint count the solver's chosen
+        strategy will have (which may be user-supplied) -- the floor below must cover at
+        least that many stints, otherwise a durability guarantee sized too small can make
+        the solver infeasible when the user requires more stops (less room per stint).
         """
         if self._compound_durability_cache is None:
             full_df = self.dataset_loader.load_dataset()
@@ -163,6 +218,29 @@ class BackendOptimizationRunner:
             durability = {compound: max(value, min_required) for compound, value in durability.items()}
 
         return durability
+
+    @staticmethod
+    def _get_degradation_risk_tiers(max_stint_durability: Dict[str, int]) -> Dict[str, List[int]]:
+        """Per-compound tyre-age thresholds for the 4 degradation-risk tiers (0=low,
+        1=moderate, 2=high, 3=very high), scaled to that compound's own real durability
+        rather than a fixed age cutoff -- a compound that durably lasts 40 laps and one
+        that lasts 20 reach the same relative wear state at different absolute ages.
+
+        Tried fitting these boundaries directly from lap-time-vs-tyre-age data (both raw
+        and stint-relative); neither showed a usable monotonic signal in this dataset
+        (confounded by fuel burn-off, traffic, SC periods) -- so the tier split itself
+        (40%/70%/90% of durability) is a physically reasonable choice, not a data fit.
+
+        Returns {compound: [t1, t2, t3]} where tyre age <= t1 is low risk, <= t2 is
+        moderate, <= t3 is high, and above t3 is very high.
+        """
+        tiers: Dict[str, List[int]] = {}
+        for compound, durability in max_stint_durability.items():
+            t1 = max(1, round(durability * 0.4))
+            t2 = max(t1 + 1, round(durability * 0.7))
+            t3 = max(t2 + 1, round(durability * 0.9))
+            tiers[compound] = [t1, t2, t3]
+        return tiers
 
     def _build_predicted_lap_times(
         self, df: "pd.DataFrame", compounds: List[str], total_laps: int
@@ -294,36 +372,40 @@ class BackendOptimizationRunner:
             rates[compound] = round(max(float(slope), 0.0), 4)
         return rates
 
-    def _get_target_degradation_index(
-        self, race_df: "pd.DataFrame", compound_degradations: Dict[str, float]
-    ) -> float:
-        """Real degradation-index target D* for this race: the degradation index of the
-        actual compound mix drivers ran, weighted by how many real laps were run on each
-        compound. Mirrors how target_pit_stops is derived from the real median pit count,
-        rather than using an arbitrary fixed target.
-        """
-        lap_counts = race_df["Compound"].astype(str).str.upper().value_counts()
-        lap_counts = lap_counts[lap_counts.index.isin(compound_degradations)]
-        if lap_counts.empty:
-            return round(sum(compound_degradations.values()) / len(compound_degradations), 3) if compound_degradations else 0.5
-        total_laps = lap_counts.sum()
-        weighted = sum(compound_degradations[compound] * count for compound, count in lap_counts.items())
-        return round(float(weighted / total_laps), 3)
-
     @staticmethod
-    def _get_compound_degradation_index(compounds: List[str]) -> Dict[str, float]:
-        """Relative degradation severity per compound, 0 (lasts longest) to 1 (wears fastest).
-
-        Ranked by the standard Pirelli softness order rather than a regression on raw lap
-        times: this dataset's lap times are dominated by fuel burn-off, traffic, and
-        safety-car periods, which makes a direct per-lap degradation regression unreliable,
-        whereas the softer-degrades-faster physical ordering is well established.
+    def _get_target_risk_score(race_df: "pd.DataFrame", risk_tiers: Dict[str, List[int]]) -> float:
+        """Real target risk score R* for this race: the actual degradation-risk score of
+        real drivers' real stints, using their real recorded TyreLife (tyre age) against
+        the risk tiers. Computed per (driver, stint), then averaged across drivers, so R*
+        reflects what real strategies in this race actually incurred -- mirrors how
+        target_pit_stops is derived from the real median pit count rather than a guess.
         """
-        ranked = [c for c in COMPOUND_SOFTNESS_ORDER if c in compounds]
-        if len(ranked) <= 1:
-            return {compound: 0.5 for compound in compounds}
-        n = len(ranked)
-        return {compound: round(1.0 - (idx / (n - 1)), 3) for idx, compound in enumerate(ranked)}
+        stints = race_df.dropna(subset=["Stint", "Compound", "TyreLife"]).copy()
+        stints["Compound"] = stints["Compound"].astype(str).str.upper()
+        if stints.empty:
+            return 1.0
+
+        max_age_per_stint = (
+            stints.groupby(["Driver", "Stint", "Compound"])["TyreLife"].max().reset_index()
+        )
+
+        def risk_for_age(compound: str, age: float) -> int:
+            t1, t2, t3 = risk_tiers.get(compound, [10, 20, 30])
+            if age <= t1:
+                return 0
+            if age <= t2:
+                return 1
+            if age <= t3:
+                return 2
+            return 3
+
+        max_age_per_stint["risk"] = max_age_per_stint.apply(
+            lambda row: risk_for_age(row["Compound"], row["TyreLife"]), axis=1
+        )
+        per_driver_total_risk = max_age_per_stint.groupby("Driver")["risk"].sum()
+        if per_driver_total_risk.empty:
+            return 1.0
+        return round(float(per_driver_total_risk.mean()), 3)
 
     def get_dashboard_summary(self) -> Dict[str, Any]:
         """Return the current project data summary for the home dashboard."""
@@ -393,8 +475,9 @@ class BackendOptimizationRunner:
         year: int,
         race_name: str,
         driver_code: Optional[str] = None,
-        max_pit_stops: Optional[int] = None,
+        min_pit_stops: Optional[int] = None,
         min_stint_length: Optional[int] = None,
+        max_sets_per_compound: Optional[Dict[str, int]] = None,
     ) -> tuple[Scope1Parameters, Dict[str, Any]]:
         """Construct a realistic Scope 1 parameter set from the selected race dataset."""
         df = self.dataset_loader.get_race_dataframe(year, race_name, driver_code)
@@ -409,21 +492,26 @@ class BackendOptimizationRunner:
         total_laps = int(df["Lap"].max()) if "Lap" in df.columns else 58
         lap_times_by_compound = self._build_predicted_lap_times(df, compounds, total_laps)
         constraints = self._resolve_strategy_constraints(
-            full_race_df, total_laps, max_pit_stops, min_stint_length
+            full_race_df, total_laps, min_pit_stops, min_stint_length
         )
+        sets_constraints = self._resolve_max_sets_per_compound(
+            full_race_df, compounds, constraints["min_pit_stops"], max_sets_per_compound
+        )
+        constraints.update(sets_constraints)
 
         parameters = Scope1Parameters(
             total_laps=total_laps,
             compounds=compounds,
             pit_loss_p=self._get_pit_loss_seconds(year, race_name),
-            max_pit_stops=constraints["max_pit_stops"],
+            min_pit_stops=constraints["min_pit_stops"],
             min_stint_length=constraints["min_stint_length"],
             max_stint_durability=self._get_max_stint_durability(
                 compounds,
                 race_df=full_race_df,
                 total_laps=total_laps,
-                max_stints=constraints["max_pit_stops"] + 1,
+                max_stints=constraints["min_pit_stops"] + 1,
             ),
+            max_sets_per_compound=constraints["max_sets_per_compound"],
             predicted_lap_times=lap_times_by_compound,
         )
         return parameters, constraints
@@ -433,14 +521,32 @@ class BackendOptimizationRunner:
         year: int,
         race_name: str,
         driver_code: Optional[str] = None,
-        max_pit_stops: Optional[int] = None,
+        min_pit_stops: Optional[int] = None,
         min_stint_length: Optional[int] = None,
+        max_sets_per_compound: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """Return a real Scope 1 strategy preview for the frontend."""
         try:
             parameters, constraints = self._build_scope1_parameters(
-                year, race_name, driver_code, max_pit_stops, min_stint_length
+                year, race_name, driver_code, min_pit_stops, min_stint_length, max_sets_per_compound
             )
+            if not constraints["max_sets_per_compound_feasible"]:
+                total_sets = sum(parameters.max_sets_per_compound.values())
+                stints_needed = parameters.min_pit_stops + 1
+                return {
+                    "year": year,
+                    "race_name": race_name,
+                    "driver_code": driver_code,
+                    "strategy": [],
+                    "max_sets_per_compound": parameters.max_sets_per_compound,
+                    "max_sets_per_compound_valid_range": constraints["max_sets_per_compound_valid_range"],
+                    "message": (
+                        f"Not enough tyre sets entered: {total_sets} total across "
+                        f"{', '.join(parameters.compounds)}, but this strategy needs at "
+                        f"least {stints_needed} stints (min_pit_stops={parameters.min_pit_stops} + 1). "
+                        "Increase one or more compound set counts, or lower min pit stops."
+                    ),
+                }
             result = Scope1MilpSolver().solve(parameters)
             stints = [
                 {
@@ -462,10 +568,12 @@ class BackendOptimizationRunner:
                 "solver_status": result.solver_status,
                 "pit_laps": result.optimal_pit_laps,
                 "pit_loss_seconds": parameters.pit_loss_p,
-                "max_pit_stops": parameters.max_pit_stops,
+                "min_pit_stops": parameters.min_pit_stops,
                 "min_stint_length": parameters.min_stint_length,
-                "max_pit_stops_valid_range": constraints["max_pit_stops_valid_range"],
+                "min_pit_stops_valid_range": constraints["min_pit_stops_valid_range"],
                 "min_stint_length_valid_range": constraints["min_stint_length_valid_range"],
+                "max_sets_per_compound": parameters.max_sets_per_compound,
+                "max_sets_per_compound_valid_range": constraints["max_sets_per_compound_valid_range"],
                 "message": "Scope 1 MILP solved successfully.",
             }
         except Exception as exc:  # pragma: no cover - user-facing fallback
@@ -482,21 +590,25 @@ class BackendOptimizationRunner:
         year = int(request_data.get("year", 2024))
         race_name = str(request_data.get("race_name", "Australian Grand Prix"))
         driver_code = request_data.get("driver_code")
-        max_pit_stops = request_data.get("max_pit_stops")
+        min_pit_stops = request_data.get("min_pit_stops")
         min_stint_length = request_data.get("min_stint_length")
-        return self.build_strategy_preview(year, race_name, driver_code, max_pit_stops, min_stint_length)
+        max_sets_per_compound = request_data.get("max_sets_per_compound")
+        return self.build_strategy_preview(
+            year, race_name, driver_code, min_pit_stops, min_stint_length, max_sets_per_compound
+        )
 
     def run_scope2(self, request_data: Any) -> Any:
         """Solve the Scope 2 goal-programming model for the selected race."""
         year = int(request_data.get("year", 2024))
         race_name = str(request_data.get("race_name", "Australian Grand Prix"))
         driver_code = request_data.get("driver_code")
-        max_pit_stops_input = request_data.get("max_pit_stops")
+        min_pit_stops_input = request_data.get("min_pit_stops")
         min_stint_length_input = request_data.get("min_stint_length")
+        max_sets_per_compound_input = request_data.get("max_sets_per_compound")
 
         try:
             scope1 = self.build_strategy_preview(
-                year, race_name, driver_code, max_pit_stops_input, min_stint_length_input
+                year, race_name, driver_code, min_pit_stops_input, min_stint_length_input, max_sets_per_compound_input
             )
             scope1_target = float(scope1.get("estimated_race_time_seconds", 0.0))
             weights = GoalWeights(**(request_data.get("weights") or {})) if request_data.get("weights") else GoalWeights()
@@ -509,8 +621,30 @@ class BackendOptimizationRunner:
             total_laps = int(df["Lap"].max()) if "Lap" in df.columns else 58
             predicted = self._build_predicted_lap_times(df, compounds, total_laps)
             constraints = self._resolve_strategy_constraints(
-                full_race_df, total_laps, max_pit_stops_input, min_stint_length_input
+                full_race_df, total_laps, min_pit_stops_input, min_stint_length_input
             )
+            sets_constraints = self._resolve_max_sets_per_compound(
+                full_race_df, compounds, constraints["min_pit_stops"], max_sets_per_compound_input
+            )
+            constraints.update(sets_constraints)
+
+            if not constraints["max_sets_per_compound_feasible"]:
+                total_sets = sum(sets_constraints["max_sets_per_compound"].values())
+                stints_needed = constraints["min_pit_stops"] + 1
+                return {
+                    "year": year,
+                    "race_name": race_name,
+                    "driver_code": driver_code,
+                    "strategy": [],
+                    "max_sets_per_compound": sets_constraints["max_sets_per_compound"],
+                    "max_sets_per_compound_valid_range": sets_constraints["max_sets_per_compound_valid_range"],
+                    "message": (
+                        f"Not enough tyre sets entered: {total_sets} total across "
+                        f"{', '.join(compounds)}, but this strategy needs at least "
+                        f"{stints_needed} stints (min_pit_stops={constraints['min_pit_stops']} + 1). "
+                        "Increase one or more compound set counts, or lower min pit stops."
+                    ),
+                }
 
             real_pit_counts = (
                 full_race_df.dropna(subset=["Stint"]).groupby("Driver")["Stint"].max() - 1
@@ -518,9 +652,16 @@ class BackendOptimizationRunner:
             target_pit_stops = (
                 int(round(real_pit_counts.median())) if not real_pit_counts.empty else 1
             )
-            target_pit_stops = max(1, min(target_pit_stops, constraints["max_pit_stops"]))
-            compound_degradations = self._get_compound_degradation_index(compounds)
-            target_degradation = self._get_target_degradation_index(full_race_df, compound_degradations)
+            target_pit_stops = max(target_pit_stops, constraints["min_pit_stops"])
+
+            max_stint_durability = self._get_max_stint_durability(
+                compounds,
+                race_df=full_race_df,
+                total_laps=total_laps,
+                max_stints=constraints["min_pit_stops"] + 1,
+            )
+            risk_tiers = self._get_degradation_risk_tiers(max_stint_durability)
+            target_risk = self._get_target_risk_score(full_race_df, risk_tiers)
 
             params = Scope2Parameters(
                 total_laps=total_laps,
@@ -529,19 +670,15 @@ class BackendOptimizationRunner:
                 targets=GoalTargets(
                     target_race_time_t_star=scope1_target,
                     target_pit_stops_p_star=target_pit_stops,
-                    target_degradation_d_star=target_degradation,
+                    target_degradation_d_star=target_risk,
                 ),
                 weights=weights,
-                max_pit_stops=constraints["max_pit_stops"],
+                min_pit_stops=constraints["min_pit_stops"],
                 min_stint_length=constraints["min_stint_length"],
-                max_stint_durability=self._get_max_stint_durability(
-                    compounds,
-                    race_df=full_race_df,
-                    total_laps=total_laps,
-                    max_stints=constraints["max_pit_stops"] + 1,
-                ),
+                max_stint_durability=max_stint_durability,
+                max_sets_per_compound=constraints["max_sets_per_compound"],
                 predicted_lap_times=predicted,
-                compound_degradations=compound_degradations,
+                risk_tiers=risk_tiers,
             )
             result = Scope2GoalSolver().solve(params)
             stints = [
@@ -558,17 +695,21 @@ class BackendOptimizationRunner:
                 "pit_stop_count": result.pit_stop_count,
                 "strategy": stints,
                 "deviations": result.deviations.model_dump(),
+                "risk_score": round(result.risk_score, 2),
                 "objective_value_z": round(result.objective_value_z, 4),
                 "solver_status": result.solver_status,
                 "pit_loss_seconds": params.pit_loss_p,
-                "max_pit_stops": params.max_pit_stops,
+                "min_pit_stops": params.min_pit_stops,
                 "min_stint_length": params.min_stint_length,
-                "max_pit_stops_valid_range": constraints["max_pit_stops_valid_range"],
+                "min_pit_stops_valid_range": constraints["min_pit_stops_valid_range"],
                 "min_stint_length_valid_range": constraints["min_stint_length_valid_range"],
+                "max_sets_per_compound": params.max_sets_per_compound,
+                "max_sets_per_compound_valid_range": constraints["max_sets_per_compound_valid_range"],
+                "risk_tiers": risk_tiers,
                 "targets": {
                     "target_race_time_seconds": round(scope1_target, 2),
                     "target_pit_stops": target_pit_stops,
-                    "target_degradation_index": params.targets.target_degradation_d_star,
+                    "target_risk_score": params.targets.target_degradation_d_star,
                 },
                 "message": "Scope 2 goal programming solved successfully.",
             }

@@ -9,7 +9,7 @@ and it enforces its own strict sum-to-1 validation.
 Field names match exactly what the frontend sends to /api/scope1/optimize,
 /api/scope2/optimize, and /api/compare (see frontend/src/App.tsx).
 """
-from typing import Optional
+from typing import Dict, Optional
 from pydantic import BaseModel, Field
 
 from src.f1_optimizer.scope2.goals.weights import GoalWeights
@@ -20,8 +20,9 @@ class OptimizeScope1Request(BaseModel):
     year: int
     race_name: str
     driver_code: Optional[str] = None
-    max_pit_stops: Optional[int] = None
+    min_pit_stops: Optional[int] = None
     min_stint_length: Optional[int] = None
+    max_sets_per_compound: Optional[Dict[str, int]] = None
 
 
 class OptimizeScope2Request(BaseModel):
@@ -29,8 +30,9 @@ class OptimizeScope2Request(BaseModel):
     year: int
     race_name: str
     driver_code: Optional[str] = None
-    max_pit_stops: Optional[int] = None
+    min_pit_stops: Optional[int] = None
     min_stint_length: Optional[int] = None
+    max_sets_per_compound: Optional[Dict[str, int]] = None
     weights: GoalWeights = Field(default_factory=GoalWeights)
 
 
@@ -40,6 +42,7 @@ class CompareStrategiesRequest(BaseModel):
     year: int
     race_name: str
     driver_code: Optional[str] = None
-    max_pit_stops: Optional[int] = None
+    min_pit_stops: Optional[int] = None
     min_stint_length: Optional[int] = None
+    max_sets_per_compound: Optional[Dict[str, int]] = None
     weights: GoalWeights = Field(default_factory=GoalWeights)

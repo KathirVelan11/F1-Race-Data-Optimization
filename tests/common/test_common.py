@@ -18,7 +18,9 @@ def test_dataset_loader_reads_master_csv():
     loader = DatasetLoader()
     seasons = loader.get_available_seasons()
     assert seasons
-    assert 2018 in seasons
+    # 2018 is intentionally excluded: that season only used legacy compound names
+    # (ULTRASOFT/SUPERSOFT/HYPERSOFT), so no 2018 race is pure dry SOFT/MEDIUM/HARD.
+    assert 2024 in seasons
     summary = loader.get_race_summary(2024, "Australian Grand Prix")
     assert summary["total_laps"] >= 50
     assert len(summary["drivers"]) > 0

@@ -14,8 +14,18 @@ from src.f1_optimizer.scope1.parameters.scope1_parameters import Scope1Parameter
 class Scope1MilpSolver:
     """Invokes the MILP solver (e.g. PuLP with CBC/HiGHS) to solve Model 1."""
 
-    def __init__(self, solver_name: str = "PULP_CBC_CMD"):
+    def __init__(self, solver_name: str = "HiGHS", time_limit_seconds: int = 20):
+        """`solver_name` selects the backend ("HiGHS" or "PULP_CBC_CMD"); HiGHS is the
+        default since it's free and noticeably faster than CBC in practice. Model 1
+        usually solves in well under a second regardless, but the time limit is applied
+        for consistency with Scope2GoalSolver."""
         self.solver_name = solver_name
+        self.time_limit_seconds = time_limit_seconds
+
+    def _build_solver(self) -> Any:
+        if self.solver_name == "HiGHS":
+            return pulp.HiGHS(msg=False, timeLimit=self.time_limit_seconds)
+        return pulp.PULP_CBC_CMD(msg=False, timeLimit=self.time_limit_seconds)
 
     def _extract_lap_compounds(self, model: Any, parameters: Scope1Parameters) -> Dict[int, str]:
         """Extract the chosen compound for each lap from the solved model."""
@@ -116,11 +126,18 @@ class Scope1MilpSolver:
         """Solve the MILP model for the given parameters and return structured result."""
         start_time = time.perf_counter()
         model = Scope1MilpModel(parameters).build()
-        status = model.solve(pulp.PULP_CBC_CMD(msg=False))
+        status = model.solve(self._build_solver())
         solve_duration = time.perf_counter() - start_time
 
-        if pulp.LpStatus[status] != "Optimal":
+        accepted_statuses = {"Optimal", "Not Solved"}
+        if pulp.LpStatus[status] not in accepted_statuses:
             raise ValueError(f"MILP could not find an optimal solution: {pulp.LpStatus[status]}")
+        if pulp.value(model.variablesDict().get(f"x_1_{parameters.compounds[0]}")) is None:
+            raise ValueError(
+                f"MILP solve hit its {self.time_limit_seconds}s time limit without finding "
+                "any feasible solution. Try relaxing constraints (lower min pit stops, "
+                "more tyre sets) or increasing the time limit."
+            )
 
         lap_compounds = self._extract_lap_compounds(model, parameters)
         lap_compounds = self._normalize_to_valid_stints(lap_compounds, parameters)
@@ -175,12 +192,14 @@ class Scope1MilpSolver:
             + parameters.pit_loss_p * len(optimal_pit_laps)
         )
 
+        reported_status = "Optimal" if pulp.LpStatus[status] == "Optimal" else "Best found (time limit reached)"
+
         return Scope1OptimizationResult(
             minimum_predicted_race_time=total_race_time,
             optimal_pit_laps=optimal_pit_laps,
             pit_stop_count=len(optimal_pit_laps),
             stints=stints,
             lap_compounds=lap_compounds,
-            solver_status=pulp.LpStatus[status],
+            solver_status=reported_status,
             solve_duration_seconds=solve_duration,
         )

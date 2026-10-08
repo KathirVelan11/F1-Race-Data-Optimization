@@ -23,6 +23,7 @@ class Scope2OptimizationResult(BaseModel):
     optimal_pit_laps: List[int] = Field(default_factory=list, description="Laps after which pit stop occurs")
     stints: List[StintPlan] = Field(default_factory=list, description="Tyre stints with compound and length")
     deviations: GoalDeviations = Field(..., description="Achieved deviation variables")
+    risk_score: float = Field(..., description="Total degradation-risk score for this strategy (sum of per-lap risk-tier weights, 0=low..3=very high)")
     objective_value_z: float = Field(..., description="Weighted penalty objective value Z")
     solver_status: str = Field(..., description="Solver exit status")
     solve_duration_seconds: float = Field(..., description="Solve duration in seconds")

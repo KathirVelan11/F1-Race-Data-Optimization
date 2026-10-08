@@ -1,5 +1,5 @@
 """Scope 2 service coordinating goal definitions, parameters, and Goal Programming solve."""
-from typing import Optional
+from typing import Dict, Optional
 
 from src.f1_optimizer.common.race.race_context import RaceContext
 from src.f1_optimizer.scope2.goals.goal_definitions import GoalTargets
@@ -22,14 +22,15 @@ class Scope2Service:
         target_pit_stops_p_star: int,
         target_degradation_d_star: float,
         weights: GoalWeights,
-        max_pit_stops: int,
+        min_pit_stops: int,
         min_stint_length: int,
+        max_sets_per_compound: Dict[str, int],
     ) -> Scope2OptimizationResult:
         """Run Goal Programming using reference T* from Scope 1 and team priority weights.
 
-        `max_pit_stops` / `min_stint_length` must be resolved by the caller from real race
-        data, same as Scope1Service -- no default here, since this service has no race
-        data of its own to derive a sane value from.
+        `min_pit_stops` / `min_stint_length` / `max_sets_per_compound` must be resolved by
+        the caller from real race data, same as Scope1Service -- no default here, since
+        this service has no race data of its own to derive a sane value from.
         """
         params = Scope2Parameters(
             total_laps=race_context.total_laps,
@@ -41,9 +42,10 @@ class Scope2Service:
                 target_degradation_d_star=target_degradation_d_star,
             ),
             weights=weights,
-            max_pit_stops=max_pit_stops,
+            min_pit_stops=min_pit_stops,
             min_stint_length=min_stint_length,
             max_stint_durability=race_context.compound_durability_limits,
+            max_sets_per_compound=max_sets_per_compound,
             predicted_lap_times={
                 lap: {
                     compound: (race_context.compound_base_times[compound]
@@ -52,6 +54,19 @@ class Scope2Service:
                 }
                 for lap in range(1, race_context.total_laps + 1)
             },
-            compound_degradations=race_context.compound_degradation_slopes,
+            risk_tiers=self._risk_tiers_from_durability(race_context.compound_durability_limits),
         )
         return self.solver.solve(params)
+
+    @staticmethod
+    def _risk_tiers_from_durability(durability: Dict[str, int]) -> Dict[str, list]:
+        """Same 40%/70%/90%-of-durability tier split as
+        BackendOptimizationRunner._get_degradation_risk_tiers, duplicated here since this
+        legacy service doesn't go through the runner."""
+        tiers: Dict[str, list] = {}
+        for compound, value in durability.items():
+            t1 = max(1, round(value * 0.4))
+            t2 = max(t1 + 1, round(value * 0.7))
+            t3 = max(t2 + 1, round(value * 0.9))
+            tiers[compound] = [t1, t2, t3]
+        return tiers

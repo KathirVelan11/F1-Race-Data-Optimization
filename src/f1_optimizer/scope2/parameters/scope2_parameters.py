@@ -20,14 +20,22 @@ class Scope2Parameters(BaseModel):
     pit_loss_p: float = Field(..., description="Pit-stop time loss P, derived from real race/circuit data")
     targets: GoalTargets = Field(..., description="Goal targets T*, P*, D*")
     weights: GoalWeights = Field(default_factory=GoalWeights, description="Priority weights w1, w2, w3")
-    max_pit_stops: int = Field(..., description="Max pit stops, derived from real data or user input")
+    min_pit_stops: int = Field(..., description="Min pit stops, derived from real data or user input")
     min_stint_length: int = Field(..., description="Min stint length, derived from real data or user input")
     max_stint_durability: Dict[str, int] = Field(
         ..., description="L_c^max maximum durable stint length for compound c, derived from real tyre-life data"
     )
+    max_sets_per_compound: Dict[str, int] = Field(
+        ..., description="Max number of separate stints allowed on each compound (tyre-set allocation limit)"
+    )
     predicted_lap_times: Dict[int, Dict[str, float]] = Field(
         ..., description="T_{l,c} predicted lap times per lap and compound"
     )
-    compound_degradations: Dict[str, float] = Field(
-        ..., description="Relative degradation severity per compound, 0 (longest-lasting) to 1 (fastest-wearing)"
+    risk_tiers: Dict[str, List[int]] = Field(
+        ...,
+        description=(
+            "Per-compound tyre-age thresholds [t1,t2,t3] for the 4 degradation-risk tiers "
+            "(0=low age<=t1, 1=moderate age<=t2, 2=high age<=t3, 3=very high age>t3), "
+            "scaled to that compound's own real durability."
+        ),
     )

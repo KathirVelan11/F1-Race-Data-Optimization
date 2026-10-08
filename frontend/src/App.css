@@ -229,6 +229,10 @@
   font-size: 1.25rem;
 }
 
+.model-select-panel .model-tabs {
+  margin-bottom: 0;
+}
+
 .model-tabs {
   display: flex;
   gap: 8px;
@@ -615,6 +619,32 @@
   color: #b3bfd4;
   margin-top: 16px;
   line-height: 1.6;
+}
+
+.empty-state--error {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.validation-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: 8px;
+}
+
+.validation-error {
+  color: #fca5a5;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 0;
 }
 
 @media (max-width: 900px) {

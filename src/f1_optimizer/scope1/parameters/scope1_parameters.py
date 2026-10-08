@@ -24,10 +24,13 @@ class Scope1Parameters(BaseModel):
     total_laps: int = Field(..., description="Total race laps N")
     compounds: List[str] = Field(..., description="Tyre compounds present in this race's data")
     pit_loss_p: float = Field(..., description="Pit-stop time loss P, derived from real race/circuit data")
-    max_pit_stops: int = Field(..., description="Max pit stops (constraint b: sum p_l <= max_pit_stops)")
+    min_pit_stops: int = Field(..., description="Min pit stops (constraint b: sum p_l >= min_pit_stops)")
     min_stint_length: int = Field(..., description="Min stint length (constraint d)")
     max_stint_durability: Dict[str, int] = Field(
         ..., description="L_c^max maximum durable stint length for compound c, derived from real tyre-life data"
+    )
+    max_sets_per_compound: Dict[str, int] = Field(
+        ..., description="Max number of separate stints allowed on each compound (tyre-set allocation limit)"
     )
     predicted_lap_times: Dict[int, Dict[str, float]] = Field(
         ..., description="T_{l,c} predicted lap times per lap and compound"

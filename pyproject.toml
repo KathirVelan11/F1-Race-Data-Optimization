@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
+    "highspy>=1.15.1",
     "numpy>=1.26.0",
     "pandas>=2.2.0",
     "pulp>=2.8.0,<3",
