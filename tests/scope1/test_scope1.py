@@ -100,7 +100,7 @@ def test_scope1_service_run_optimization_from_race_context():
         compound_durability_limits={"SOFT": 20, "MEDIUM": 30, "HARD": 50},
     )
 
-    result = Scope1Service().run_optimization(race_context)
+    result = Scope1Service().run_optimization(race_context, max_pit_stops=2, min_stint_length=5)
     assert result.minimum_predicted_race_time > 0
     assert result.stints
     assert result.pit_stop_count <= 2

@@ -39,6 +39,7 @@ class BackendOptimizationRunner:
         self.dataset_loader = dataset_loader or DatasetLoader()
         self._compound_durability_cache: Optional[Dict[str, int]] = None
         self._compound_base_pace_cache: Optional[Dict[str, float]] = None
+        self._compound_degradation_rate_cache: Optional[Dict[str, float]] = None
         self._pit_loss_by_race_cache: Optional[Dict[Any, float]] = None
         self._pit_loss_by_circuit_cache: Optional[Dict[str, float]] = None
         self._pit_loss_global_mean: Optional[float] = None
@@ -167,9 +168,10 @@ class BackendOptimizationRunner:
         self, df: "pd.DataFrame", compounds: List[str], total_laps: int
     ) -> Dict[int, Dict[str, float]]:
         """Average real recorded lap times per (lap, compound); fall back to a data-driven
-        base pace plus a softness-ranked degradation slope where no laps were recorded."""
-        base_pace = self._get_compound_base_pace(compounds)
-        degradation_index = self._get_compound_degradation_index(compounds)
+        base pace plus a real fitted degradation rate where no laps were recorded for that
+        exact (lap, compound) pair."""
+        base_pace = self._get_compound_base_pace(compounds, race_df=df)
+        degradation_rate = self._get_compound_degradation_rate(compounds, race_df=df)
         lap_times: Dict[int, Dict[str, float]] = {}
 
         for lap in range(1, total_laps + 1):
@@ -187,8 +189,8 @@ class BackendOptimizationRunner:
         for lap in range(1, total_laps + 1):
             for compound in compounds:
                 if lap_times[lap].get(compound, 0.0) == 0.0:
-                    base = base_pace.get(compound, 90.0)
-                    degradation = 0.02 + 0.06 * degradation_index.get(compound, 0.5)
+                    base = base_pace[compound]
+                    degradation = degradation_rate[compound]
                     lap_times[lap][compound] = base + degradation * lap
 
         return lap_times
@@ -206,9 +208,14 @@ class BackendOptimizationRunner:
         ordered = [c for c in COMPOUND_SOFTNESS_ORDER if c in present]
         return ordered or ["SOFT", "MEDIUM", "HARD"]
 
-    def _get_compound_base_pace(self, compounds: List[str]) -> Dict[str, float]:
-        """Mean lap time (seconds) per compound across the full dataset, for fallback laps
-        where a race has no recorded laps on a given compound."""
+    def _get_compound_base_pace(
+        self, compounds: List[str], race_df: Optional["pd.DataFrame"] = None
+    ) -> Dict[str, float]:
+        """Mean lap time (seconds) per compound, preferring this specific race's own real
+        laps (lap time is dominated by circuit length/layout, e.g. Monaco ~82s vs a
+        global SOFT average of ~97s pooled across every circuit), falling back to the
+        dataset-wide mean per compound, and only then to the dataset-wide mean across all
+        compounds for a compound with no data anywhere."""
         if self._compound_base_pace_cache is None:
             full_df = self.dataset_loader.load_dataset()
             df = full_df.copy()
@@ -218,9 +225,90 @@ class BackendOptimizationRunner:
             df = df[~df["Compound"].isin(EXCLUDED_COMPOUNDS)]
             self._compound_base_pace_cache = df.groupby("Compound")["LapSeconds"].mean().to_dict()
 
-        fallback = float(sum(self._compound_base_pace_cache.values()) / len(self._compound_base_pace_cache)) \
+        race_pace: Dict[str, float] = {}
+        if race_df is not None and not race_df.empty:
+            race = race_df.copy()
+            race["Compound"] = race["Compound"].astype(str).str.upper()
+            race["LapSeconds"] = race["LapTime"].map(lambda value: lap_time_str_to_seconds(str(value)))
+            race = race.dropna(subset=["LapSeconds"])
+            race = race[~race["Compound"].isin(EXCLUDED_COMPOUNDS)]
+            race_pace = race.groupby("Compound")["LapSeconds"].mean().to_dict()
+
+        dataset_wide_fallback = (
+            float(sum(self._compound_base_pace_cache.values()) / len(self._compound_base_pace_cache))
             if self._compound_base_pace_cache else 90.0
-        return {compound: float(self._compound_base_pace_cache.get(compound, fallback)) for compound in compounds}
+        )
+        return {
+            compound: float(
+                race_pace.get(compound, self._compound_base_pace_cache.get(compound, dataset_wide_fallback))
+            )
+            for compound in compounds
+        }
+
+    def _get_compound_degradation_rate(
+        self, compounds: List[str], race_df: Optional["pd.DataFrame"] = None
+    ) -> Dict[str, float]:
+        """Real degradation rate (seconds lost per lap of tyre age) per compound, fit from
+        actual lap-time-vs-TyreLife data instead of an assumed formula.
+
+        Prefers this race's own data (circuit-specific wear characteristics, e.g. Monaco's
+        low-speed laps wear tyres far more slowly than a high-speed circuit), falling back
+        to the dataset-wide fit per compound, and finally to 0.0 (flat, no assumed
+        degradation) only if a compound has no tyre-age data anywhere -- never a guessed
+        slope.
+        """
+        if self._compound_degradation_rate_cache is None:
+            full_df = self.dataset_loader.load_dataset()
+            self._compound_degradation_rate_cache = self._fit_degradation_rates(full_df)
+
+        race_rates: Dict[str, float] = {}
+        if race_df is not None and not race_df.empty:
+            race_rates = self._fit_degradation_rates(race_df)
+
+        return {
+            compound: race_rates.get(
+                compound, self._compound_degradation_rate_cache.get(compound, 0.0)
+            )
+            for compound in compounds
+        }
+
+    @staticmethod
+    def _fit_degradation_rates(race_df: "pd.DataFrame") -> Dict[str, float]:
+        """Per compound: slope of a linear fit of LapSeconds vs TyreLife, clamped to >= 0
+        (a compound cannot get faster as it wears; a negative raw fit means the signal is
+        dominated by fuel burn-off/traffic rather than tyre wear, so it's floored at 0
+        rather than reporting a physically backwards number)."""
+        df = race_df.copy()
+        df["Compound"] = df["Compound"].astype(str).str.upper()
+        df["LapSeconds"] = df["LapTime"].map(lambda value: lap_time_str_to_seconds(str(value)))
+        df = df.dropna(subset=["LapSeconds", "TyreLife"])
+        df = df[~df["Compound"].isin(EXCLUDED_COMPOUNDS)]
+
+        rates: Dict[str, float] = {}
+        for compound, group in df.groupby("Compound"):
+            if len(group) < 5 or group["TyreLife"].nunique() < 2:
+                continue
+            slope = group["TyreLife"].cov(group["LapSeconds"]) / group["TyreLife"].var()
+            if pd.isna(slope):
+                continue
+            rates[compound] = round(max(float(slope), 0.0), 4)
+        return rates
+
+    def _get_target_degradation_index(
+        self, race_df: "pd.DataFrame", compound_degradations: Dict[str, float]
+    ) -> float:
+        """Real degradation-index target D* for this race: the degradation index of the
+        actual compound mix drivers ran, weighted by how many real laps were run on each
+        compound. Mirrors how target_pit_stops is derived from the real median pit count,
+        rather than using an arbitrary fixed target.
+        """
+        lap_counts = race_df["Compound"].astype(str).str.upper().value_counts()
+        lap_counts = lap_counts[lap_counts.index.isin(compound_degradations)]
+        if lap_counts.empty:
+            return round(sum(compound_degradations.values()) / len(compound_degradations), 3) if compound_degradations else 0.5
+        total_laps = lap_counts.sum()
+        weighted = sum(compound_degradations[compound] * count for compound, count in lap_counts.items())
+        return round(float(weighted / total_laps), 3)
 
     @staticmethod
     def _get_compound_degradation_index(compounds: List[str]) -> Dict[str, float]:
@@ -431,6 +519,8 @@ class BackendOptimizationRunner:
                 int(round(real_pit_counts.median())) if not real_pit_counts.empty else 1
             )
             target_pit_stops = max(1, min(target_pit_stops, constraints["max_pit_stops"]))
+            compound_degradations = self._get_compound_degradation_index(compounds)
+            target_degradation = self._get_target_degradation_index(full_race_df, compound_degradations)
 
             params = Scope2Parameters(
                 total_laps=total_laps,
@@ -439,7 +529,7 @@ class BackendOptimizationRunner:
                 targets=GoalTargets(
                     target_race_time_t_star=scope1_target,
                     target_pit_stops_p_star=target_pit_stops,
-                    target_degradation_d_star=0.4,
+                    target_degradation_d_star=target_degradation,
                 ),
                 weights=weights,
                 max_pit_stops=constraints["max_pit_stops"],
@@ -451,7 +541,7 @@ class BackendOptimizationRunner:
                     max_stints=constraints["max_pit_stops"] + 1,
                 ),
                 predicted_lap_times=predicted,
-                compound_degradations=self._get_compound_degradation_index(compounds),
+                compound_degradations=compound_degradations,
             )
             result = Scope2GoalSolver().solve(params)
             stints = [

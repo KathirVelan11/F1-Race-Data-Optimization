@@ -25,10 +25,25 @@ def test_dataset_loader_reads_master_csv():
 
 
 def test_tyre_degradation_fitting():
-    """Verify tyre degradation model produces non-negative degradation slopes."""
+    """Verify tyre degradation model fits a non-negative slope from real race data."""
+    from src.f1_optimizer.common.data.dataset_loader import DatasetLoader
     from src.f1_optimizer.common.tyre.degradation_model import TyreDegradationModel
 
+    race_df = DatasetLoader().get_race_dataframe(2024, "Australian Grand Prix")
+    compound = race_df["Compound"].dropna().astype(str).str.upper().mode()[0]
+
     model = TyreDegradationModel()
-    slopes = model.fit_example_degradation()
-    assert set(slopes) == {"SOFT", "MEDIUM", "HARD"}
-    assert all(value >= 0 for value in slopes.values())
+    base_lap_time, degradation_rate = model.fit_compound_degradation(race_df, compound)
+
+    assert base_lap_time > 0
+    assert degradation_rate >= 0
+
+
+def test_tyre_degradation_fitting_raises_without_data():
+    """Verify the model refuses to fabricate a result when there's no real data to fit."""
+    import pandas as pd
+    import pytest as _pytest
+    from src.f1_optimizer.common.tyre.degradation_model import TyreDegradationModel
+
+    with _pytest.raises(ValueError):
+        TyreDegradationModel().fit_compound_degradation(pd.DataFrame(), "SOFT")

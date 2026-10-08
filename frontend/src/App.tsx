@@ -206,13 +206,16 @@ function App() {
       ? `Fastest option uses ${stages.length} stint${stages.length === 1 ? '' : 's'} with ${payload.pit_laps?.length ?? 0} pit stop${(payload.pit_laps?.length ?? 0) === 1 ? '' : 's'}.`
       : `Balanced option prioritizes a controlled trade-off across ${stages.length} stint${stages.length === 1 ? '' : 's'} and ${payload.pit_stop_count ?? 0} stop${(payload.pit_stop_count ?? 0) === 1 ? '' : 's'}.`
 
-    const PIT_LOSS_SECONDS = payload.pit_loss_seconds ?? 13.0
+    // pit_loss_seconds is always computed server-side from real race/circuit pit-stop
+    // data (see BackendOptimizationRunner._get_pit_loss_seconds); if it's ever missing,
+    // that's a real API contract bug worth surfacing, not a silent fake default.
+    const pitLossKnown = typeof payload.pit_loss_seconds === 'number'
     const pitStops = stages.slice(0, -1).map((stage, index) => ({
       stopNumber: index + 1,
       lap: stage.end_lap,
       fromCompound: stage.compound,
       toCompound: stages[index + 1]?.compound ?? '—',
-      costSeconds: PIT_LOSS_SECONDS,
+      costSeconds: pitLossKnown ? payload.pit_loss_seconds! : null,
     }))
 
     return (
@@ -292,12 +295,16 @@ function App() {
                         <span className="dot" data-compound={stop.toCompound}></span>
                         {stop.toCompound}
                       </span>
-                      <span className="pit-stop-cost">+{stop.costSeconds.toFixed(1)}s</span>
+                      <span className="pit-stop-cost">
+                        {stop.costSeconds !== null ? `+${stop.costSeconds.toFixed(1)}s` : 'unknown'}
+                      </span>
                     </div>
                   ))}
                   <div className="pit-stop-total">
                     <span>Total pit time</span>
-                    <strong>+{(pitStops.length * PIT_LOSS_SECONDS).toFixed(1)}s</strong>
+                    <strong>
+                      {pitLossKnown ? `+${(pitStops.length * payload.pit_loss_seconds!).toFixed(1)}s` : 'unknown'}
+                    </strong>
                   </div>
                 </>
               )}

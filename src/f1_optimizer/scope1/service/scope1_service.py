@@ -13,25 +13,35 @@ class Scope1Service:
     def __init__(self, solver: Optional[Scope1MilpSolver] = None):
         self.solver = solver or Scope1MilpSolver()
 
-    def run_optimization(self, race_context: RaceContext) -> Scope1OptimizationResult:
-        """Extract parameters from RaceContext, build the MILP, solve, and return the result."""
-        compounds = list(race_context.available_compounds or ["SOFT", "MEDIUM", "HARD"])
+    def run_optimization(
+        self,
+        race_context: RaceContext,
+        max_pit_stops: int,
+        min_stint_length: int,
+    ) -> Scope1OptimizationResult:
+        """Extract parameters from RaceContext, build the MILP, solve, and return the result.
+
+        `max_pit_stops` / `min_stint_length` must be resolved by the caller from real race
+        data (see BackendOptimizationRunner._resolve_strategy_constraints) -- this service
+        has no race data of its own to derive a sane value from, so it takes no default.
+        """
+        compounds = list(race_context.available_compounds)
         predicted_lap_times: dict[int, dict[str, float]] = {}
 
         for lap in range(1, race_context.total_laps + 1):
             predicted_lap_times[lap] = {}
             for compound in compounds:
-                base_time = race_context.compound_base_times.get(compound, 90.0)
-                degradation = race_context.compound_degradation_slopes.get(compound, 0.03)
+                base_time = race_context.compound_base_times[compound]
+                degradation = race_context.compound_degradation_slopes[compound]
                 predicted_lap_times[lap][compound] = base_time + degradation * lap
 
         parameters = {
             "total_laps": race_context.total_laps,
             "compounds": compounds,
             "pit_loss_p": race_context.pit_loss_seconds,
-            "max_pit_stops": 2,
-            "min_stint_length": 5,
-            "max_stint_durability": race_context.compound_durability_limits or {compound: 30 for compound in compounds},
+            "max_pit_stops": max_pit_stops,
+            "min_stint_length": min_stint_length,
+            "max_stint_durability": race_context.compound_durability_limits,
             "predicted_lap_times": predicted_lap_times,
         }
 

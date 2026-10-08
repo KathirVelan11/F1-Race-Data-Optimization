@@ -21,9 +21,16 @@ class Scope2Service:
         target_race_time_t_star: float,
         target_pit_stops_p_star: int,
         target_degradation_d_star: float,
-        weights: GoalWeights
+        weights: GoalWeights,
+        max_pit_stops: int,
+        min_stint_length: int,
     ) -> Scope2OptimizationResult:
-        """Run Goal Programming using reference T* from Scope 1 and team priority weights."""
+        """Run Goal Programming using reference T* from Scope 1 and team priority weights.
+
+        `max_pit_stops` / `min_stint_length` must be resolved by the caller from real race
+        data, same as Scope1Service -- no default here, since this service has no race
+        data of its own to derive a sane value from.
+        """
         params = Scope2Parameters(
             total_laps=race_context.total_laps,
             compounds=race_context.available_compounds,
@@ -34,13 +41,13 @@ class Scope2Service:
                 target_degradation_d_star=target_degradation_d_star,
             ),
             weights=weights,
-            max_pit_stops=2,
-            min_stint_length=5,
+            max_pit_stops=max_pit_stops,
+            min_stint_length=min_stint_length,
             max_stint_durability=race_context.compound_durability_limits,
             predicted_lap_times={
                 lap: {
-                    compound: (race_context.compound_base_times.get(compound, 90.0)
-                              + race_context.compound_degradation_slopes.get(compound, 0.03) * lap)
+                    compound: (race_context.compound_base_times[compound]
+                              + race_context.compound_degradation_slopes[compound] * lap)
                     for compound in race_context.available_compounds
                 }
                 for lap in range(1, race_context.total_laps + 1)

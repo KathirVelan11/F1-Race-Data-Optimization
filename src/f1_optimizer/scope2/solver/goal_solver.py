@@ -126,14 +126,17 @@ class Scope2GoalSolver:
         lap_compounds = self._extract_lap_compounds(model, parameters)
         lap_compounds = self._normalize_to_valid_stints(lap_compounds, parameters)
 
-        total_time = sum(
-            parameters.predicted_lap_times.get(lap, {}).get(compound, 0.0)
-            for lap, compound in lap_compounds.items()
-        )
         total_pit_stops = sum(
             pulp.value(model.variablesDict()[f"p_{lap}"])
             for lap in range(1, parameters.total_laps)
             if pulp.value(model.variablesDict()[f"p_{lap}"]) is not None
+        )
+        total_time = (
+            sum(
+                parameters.predicted_lap_times.get(lap, {}).get(compound, 0.0)
+                for lap, compound in lap_compounds.items()
+            )
+            + parameters.pit_loss_p * total_pit_stops
         )
         degradation_index = sum(
             parameters.compound_degradations.get(compound, 0.0) for _, compound in lap_compounds.items()

@@ -7,10 +7,15 @@ Decision Variables:
     d2+, d2-           - pit-stop goal deviation variables
     d3+, d3-           - degradation goal deviation variables
 
-Goals (Slide 14):
-    Goal 1 (Time):        T + d1- - d1+ = T*
-    Goal 2 (Pit stops):   P + d2- - d2+ = P*
-    Goal 3 (Degradation): D + d3- - d3+ = D*
+Goals, normalized by their own target so d1+/d2+/d3+ are comparable fractional
+deviations (0 = exactly on target) rather than raw units of wildly different scale
+(seconds in the thousands vs a stop count of ~1-3 vs a 0-1 index) -- without this,
+w1/w2/w3 cannot meaningfully trade off against each other, since even a tiny absolute
+time deviation (tens of seconds) numerically dwarfs the entire possible range of the
+pit-stop or degradation penalty:
+    Goal 1 (Time):        T/T* + d1- - d1+ = 1
+    Goal 2 (Pit stops):   P/P* + d2- - d2+ = 1
+    Goal 3 (Degradation): D/D* + d3- - d3+ = 1
 
 Objective:
     min Z = w1 * d1+ + w2 * d2+ + w3 * d3+
@@ -66,12 +71,15 @@ class Scope2GoalModel:
         d3_plus = pulp.LpVariable("d3_plus", lowBound=0)
         d3_minus = pulp.LpVariable("d3_minus", lowBound=0)
 
-        total_time = pulp.lpSum(
-            self.params.predicted_lap_times.get(lap, {}).get(compound, 0.0) * x[(lap, compound)]
-            for lap in laps
-            for compound in compounds
-        )
         total_pit_stops = pulp.lpSum(p.values())
+        total_time = (
+            pulp.lpSum(
+                self.params.predicted_lap_times.get(lap, {}).get(compound, 0.0) * x[(lap, compound)]
+                for lap in laps
+                for compound in compounds
+            )
+            + self.params.pit_loss_p * total_pit_stops
+        )
         degradation_index = pulp.lpSum(
             self.params.compound_degradations.get(compound, 0.0) * x[(lap, compound)]
             for lap in laps
@@ -114,9 +122,21 @@ class Scope2GoalModel:
         for lap in laps:
             model += pulp.lpSum(start[(lap, compound)] for compound in compounds) <= 1
 
-        model += total_time + d1_minus - d1_plus == self.params.targets.target_race_time_t_star
-        model += total_pit_stops + d2_minus - d2_plus == self.params.targets.target_pit_stops_p_star
-        model += degradation_index + d3_minus - d3_plus == self.params.targets.target_degradation_d_star
+        # Normalize each goal by its own target so d1+/d2+/d3+ are comparable fractional
+        # deviations (see module docstring) -- a target of 0 would make division
+        # meaningless, so such a goal falls back to an un-normalized (raw-unit) constraint,
+        # which only happens for a goal that's already trivially at/near zero anyway.
+        time_target = self.params.targets.target_race_time_t_star
+        pit_stops_target = self.params.targets.target_pit_stops_p_star
+        degradation_target = self.params.targets.target_degradation_d_star
+
+        time_scale = time_target if time_target > 0 else 1.0
+        pit_stops_scale = pit_stops_target if pit_stops_target > 0 else 1.0
+        degradation_scale = degradation_target if degradation_target > 0 else 1.0
+
+        model += (total_time / time_scale) + d1_minus - d1_plus == (time_target / time_scale)
+        model += (total_pit_stops / pit_stops_scale) + d2_minus - d2_plus == (pit_stops_target / pit_stops_scale)
+        model += (degradation_index / degradation_scale) + d3_minus - d3_plus == (degradation_target / degradation_scale)
 
         model += (
             self.params.weights.weight_time_w1 * d1_plus

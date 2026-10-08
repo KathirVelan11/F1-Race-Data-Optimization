@@ -3,6 +3,11 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.app.schemas.api_schemas import (
+    CompareStrategiesRequest,
+    OptimizeScope1Request,
+    OptimizeScope2Request,
+)
 from backend.app.services.runner import BackendOptimizationRunner
 
 router = APIRouter()
@@ -64,18 +69,18 @@ async def get_strategy_preview(year: int, race_name: str, driver_code: Optional[
 
 
 @router.post("/scope1/optimize")
-async def optimize_scope1(payload: dict):
-    """Prototype Scope 1 optimization endpoint."""
-    return runner.run_scope1(payload)
+async def optimize_scope1(payload: OptimizeScope1Request):
+    """Run Scope 1 (MILP) optimization for the selected race."""
+    return runner.run_scope1(payload.model_dump(exclude_none=True))
 
 
 @router.post("/scope2/optimize")
-async def optimize_scope2(payload: dict):
-    """Prototype Scope 2 optimization endpoint."""
-    return runner.run_scope2(payload)
+async def optimize_scope2(payload: OptimizeScope2Request):
+    """Run Scope 2 (Goal Programming) optimization for the selected race."""
+    return runner.run_scope2(payload.model_dump(exclude_none=True))
 
 
 @router.post("/compare")
-async def compare_strategies(payload: dict):
-    """Comparison endpoint for the two optimization approaches."""
-    return runner.run_comparison(payload)
+async def compare_strategies(payload: CompareStrategiesRequest):
+    """Run both models for the selected race and return a side-by-side comparison."""
+    return runner.run_comparison(payload.model_dump(exclude_none=True))
