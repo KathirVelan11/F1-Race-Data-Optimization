@@ -34,6 +34,6 @@ ax.legend(loc="upper left")
 ax.grid(axis="y", linestyle="-", alpha=0.3)
 fig.tight_layout()
 
-out_path = HERE / "model1_vs_real_12races.png"
+out_path = HERE / "model1_vs_real_12races.jpg"
 fig.savefig(out_path, dpi=1200)
 print(f"Saved {out_path}")

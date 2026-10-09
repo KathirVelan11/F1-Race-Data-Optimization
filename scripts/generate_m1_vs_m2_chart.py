@@ -44,6 +44,6 @@ ax2.set_xticklabels(labels, rotation=90, ha="center", fontsize=6)
 ax2.set_xlim(-1, len(rows))
 
 fig.tight_layout()
-out_path = HERE / "m1_vs_m2_109races.png"
+out_path = HERE / "m1_vs_m2_109races.jpg"
 fig.savefig(out_path, dpi=1200)
 print(f"Saved {out_path}")
