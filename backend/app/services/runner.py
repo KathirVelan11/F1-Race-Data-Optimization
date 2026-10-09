@@ -270,31 +270,22 @@ class BackendOptimizationRunner:
     def _build_predicted_lap_times(
         self, df: "pd.DataFrame", compounds: List[str], total_laps: int
     ) -> Dict[int, Dict[str, float]]:
-        """Average real recorded lap times per (lap, compound); fall back to a data-driven
-        base pace plus a real fitted degradation rate where no laps were recorded for that
-        exact (lap, compound) pair."""
+        """Predicted lap time per (lap, compound) from the fitted degradation model only:
+        base_pace[compound] + degradation_rate[compound] * lap. Both are fit from this
+        race's own real data (falling back to dataset-wide where this race lacks enough
+        data -- see _get_compound_base_pace / _get_compound_degradation_rate), so the
+        curve is race-specific, but raw per-lap real averages are never used directly --
+        they're noisy (fuel load, traffic, SC laps), so the smooth fitted curve is used
+        everywhere for consistency."""
         base_pace = self._get_compound_base_pace(compounds, race_df=df)
         degradation_rate = self._get_compound_degradation_rate(compounds, race_df=df)
         lap_times: Dict[int, Dict[str, float]] = {}
 
         for lap in range(1, total_laps + 1):
-            lap_rows = df[df["Lap"] == lap]
-            lap_times[lap] = {}
-            for compound in compounds:
-                compound_rows = lap_rows[lap_rows["Compound"].astype(str).str.upper() == compound]
-                values = [
-                    lap_time_str_to_seconds(str(value))
-                    for value in compound_rows["LapTime"].tolist()
-                    if lap_time_str_to_seconds(str(value)) is not None
-                ]
-                lap_times[lap][compound] = float(sum(values) / len(values)) if values else 0.0
-
-        for lap in range(1, total_laps + 1):
-            for compound in compounds:
-                if lap_times[lap].get(compound, 0.0) == 0.0:
-                    base = base_pace[compound]
-                    degradation = degradation_rate[compound]
-                    lap_times[lap][compound] = base + degradation * lap
+            lap_times[lap] = {
+                compound: base_pace[compound] + degradation_rate[compound] * lap
+                for compound in compounds
+            }
 
         return lap_times
 
