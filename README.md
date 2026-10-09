@@ -672,46 +672,54 @@ Interestingly, in this particular example, Model 2 actually came back slightly *
 
 Make sure the following are installed on your machine:
 
-- Python 3.11 or newer
+- Python 3.12 or newer
 - Node.js 18 or newer
 - npm
 - Git
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (recommended — this project is set up as a `uv` project via `pyproject.toml`/`uv.lock`). A plain `venv` + `pip` works too (step 3 shows both).
 
 ## 2. Clone and open the project
 
 ```bash
-git clone <your-repository-url>
-cd F1-Race-Data-Optimization-main
+git clone https://github.com/KathirVelan11/F1-Race-Data-Optimization.git
+cd F1-Race-Data-Optimization
 ```
 
-## 3. Create the Python environment
+## 3. Install the Python dependencies
 
-From the project root:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-If the project uses `uv` instead of `pip`, you can also use:
+From the project root, using `uv` (installs everything from `pyproject.toml`/`uv.lock` into `.venv` automatically):
 
 ```bash
 uv sync
 ```
 
+Without `uv`, create and activate a virtual environment yourself, then install the project in editable mode (there is no `requirements.txt` — dependencies live in `pyproject.toml`):
+
+```bash
+python -m venv .venv
+# macOS/Linux:
+source .venv/bin/activate
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+
+pip install --upgrade pip
+pip install -e .
+```
+
 ## 4. Start the backend
 
 ```bash
-source .venv/bin/activate
-uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 ```
+
+(Without `uv`: activate `.venv` as in step 3, then run `uvicorn backend.app.main:app --host 0.0.0.0 --port 8000` directly.)
 
 API docs will be available at:
 
 - http://localhost:8000/docs
 - http://localhost:8000/redoc
+
+The frontend expects the backend on exactly `http://localhost:8000` (hardcoded in `frontend/src/App.tsx`), so keep this port.
 
 ## 5. Start the frontend
 
@@ -732,8 +740,7 @@ Then open:
 ### Run backend tests
 
 ```bash
-source .venv/bin/activate
-pytest -q
+uv run pytest -q
 ```
 
 ### Run frontend build check
