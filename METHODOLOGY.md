@@ -1,681 +1,449 @@
 # Methodology: F1 Race Strategy & Performance Optimization
 
 **Course:** Operations Research — Course Project (Team B13: Pranesh L, Kathir Velan M, Sasi Kumar P, Jeiesh S)
-**Purpose of this document:** a complete, self-contained walkthrough of every step, formula, and constraint in the project — from raw data to the final optimized race strategy — written so that someone with no prior exposure to the codebase can learn the full method and reproduce it.
 
-This document describes the system **as actually implemented** (`backend/app/services/runner.py`, `src/f1_optimizer/scope1/`, `src/f1_optimizer/scope2/`), not just the idealized textbook formulation. Where the real implementation refines or extends the original slide-deck formulation, both are shown, with the reason for the refinement explained.
+This document explains, from the ground up, how this project turns raw Formula 1 timing data into an optimized race strategy. It is written for a reader who has never seen the code before. Every formula is explained in words before it is written in symbols, and every symbol used is defined where it first appears.
+
+The project builds two mathematical optimization models:
+
+1. **Model 1** finds the single fastest possible way to run a race — which tyres to use, and when to pit.
+2. **Model 2** finds a more *realistic, balanced* strategy — one that is still fast, but also avoids unnecessary pit stops and avoids pushing tyres dangerously far past their safe life, according to priorities the user sets.
+
+Both models are built and solved using a Python optimization library called PuLP, which lets us write down a mathematical model (decision variables, an objective to minimize, and a list of constraints) and hand it to a solver (HiGHS, with CBC as a backup) that searches for the best possible answer. Everything the models need to know — how fast each tyre compound is, how quickly it wears out, how much time a pit stop costs — is calculated directly from real historical race data, not guessed.
 
 ---
 
 ## Table of Contents
 
-1. [Problem Statement](#1-problem-statement)
-2. [Data Pipeline](#2-data-pipeline)
-3. [Parameter Estimation from Data](#3-parameter-estimation-from-data)
-4. [Model 1 — MILP: Fastest Possible Strategy](#4-model-1--milp-fastest-possible-strategy)
-5. [Model 2 — Goal Programming: Balanced Strategy](#5-model-2--goal-programming-balanced-strategy)
-6. [Degradation-Risk Scoring (Goal 3 in depth)](#6-degradation-risk-scoring-goal-3-in-depth)
-7. [Solving and Extracting a Strategy](#7-solving-and-extracting-a-strategy)
-8. [Feasibility Checks Before Solving](#8-feasibility-checks-before-solving)
-9. [Integration: Linking Model 1 and Model 2](#9-integration-linking-model-1-and-model-2)
-10. [Validation Against Real Race Results](#10-validation-against-real-race-results)
-11. [Worked Numerical Example](#11-worked-numerical-example)
-12. [Glossary of Symbols](#12-glossary-of-symbols)
+1. [The Real-World Problem](#1-the-real-world-problem)
+2. [Where the Data Comes From](#2-where-the-data-comes-from)
+3. [Turning Raw Data Into Model Inputs](#3-turning-raw-data-into-model-inputs)
+4. [Model 1: Finding the Fastest Possible Strategy](#4-model-1-finding-the-fastest-possible-strategy)
+5. [Model 2: Finding a Balanced, Realistic Strategy](#5-model-2-finding-a-balanced-realistic-strategy)
+6. [How Tyre Wear Risk Is Measured](#6-how-tyre-wear-risk-is-measured)
+7. [How the Solver's Answer Becomes a Strategy](#7-how-the-solvers-answer-becomes-a-strategy)
+8. [Checking Feasibility Before Solving](#8-checking-feasibility-before-solving)
+9. [How Model 1 and Model 2 Work Together](#9-how-model-1-and-model-2-work-together)
+10. [Checking the Models Against Real Races](#10-checking-the-models-against-real-races)
+11. [A Worked Example With Real Numbers](#11-a-worked-example-with-real-numbers)
+12. [Full List of Symbols Used](#12-full-list-of-symbols-used)
 
 ---
 
-## 1. Problem Statement
+## 1. The Real-World Problem
 
-In a Formula 1 Grand Prix:
+In a Formula 1 Grand Prix, a car has to complete a fixed number of laps around a circuit — usually somewhere between 50 and 70, depending on the track. The rules require every driver to use at least two different types of dry-weather tyre during the race, which means every driver must stop at the pits at least once to change tyres.
 
-- The race covers a fixed number of laps $N$ (typically 50–70, varies by circuit).
-- Regulations require at least one pit stop, using at least two different dry tyre compounds (in a dry race).
-- Three dry compounds are nominally available: **Soft (S)**, **Medium (M)**, **Hard (H)** — though the exact labels present differ by era (2018 used HYPERSOFT/ULTRASOFT/SUPERSOFT/SOFT/MEDIUM/HARD; 2019+ consolidated to SOFT/MEDIUM/HARD; wet races add INTERMEDIATE/WET).
-- Softer compounds are faster per lap but degrade (lose pace) faster with tyre age; harder compounds are slower but last longer.
-- Every pit stop costs real time: the car must enter the pit lane, stop, have tyres changed, and re-join — a net loss of roughly 13–30 seconds of track time depending on the circuit's pit lane geometry.
+There are three main types of dry tyre, each a trade-off between speed and durability:
 
-**The decision a race engineer must make:**
-1. How many pit stops to make.
-2. On which exact laps to pit.
-3. Which compound to fit for each resulting stint.
-4. How to trade pure lap-time speed against the operational risk of pitting and the risk of running a tyre too far into its wear life.
+- **Soft** tyres grip the track the hardest and produce the fastest lap times, but they wear out quickly.
+- **Medium** tyres are a balance — not as fast as Soft, but they last longer.
+- **Hard** tyres are the slowest of the three per lap, but they can run for a very long time before wearing out.
 
-Two optimization models are built to answer this:
+(The exact names used for compounds have changed over the years — in 2018, for example, Formula 1 used five compound names, from Hypersoft through to Hard; from 2019 onward it settled into the simpler Soft/Medium/Hard naming most fans know today. Wet-weather races also use Intermediate and Wet tyres. The project reads whichever compound names actually appear in a given race's data, rather than assuming fixed names.)
 
-| Model | Type | Answers |
-|---|---|---|
-| **Model 1 (Scope 1)** | Mixed-Integer Linear Program (MILP) | "What is the single fastest possible strategy?" |
-| **Model 2 (Scope 2)** | Goal Programming (weighted deviations) | "What is the best *balanced* strategy, trading a little time for fewer stops and safer tyre usage?" |
+A tyre's lap time also gets slower the longer it has been used — this is called **degradation**. A fresh tyre is fast; the same tyre after 20 laps of hard use is noticeably slower.
 
-Both models are built and solved with [PuLP](https://coin-or.github.io/pulp/) (HiGHS solver by default, CBC as a fallback), using **real historical F1 timing data** to derive every parameter — nothing is hand-assumed.
+Every time a car comes into the pits to change tyres, it loses real time on track — it has to slow down, enter the pit lane, come to a stop, have all four tyres changed, and rejoin the race. Depending on the circuit, this costs somewhere between about 13 and 30 seconds compared to staying out on track.
 
----
+So a race engineer planning a strategy has to decide:
 
-## 2. Data Pipeline
+1. How many times to stop for new tyres.
+2. On exactly which lap to make each stop.
+3. Which tyre compound to fit after each stop.
 
-### 2.1 Raw sources
+And they have to balance two competing goals: going as fast as possible, versus not taking unnecessary risks (an extra pit stop is an extra chance for something to go wrong in the pit lane, and an old, worn tyre is more likely to suddenly lose grip or fail).
 
-```
-data/raw/kaggle/   — Historical F1 database (1950–2024): races, results, pit_stops,
-                      lap_times, drivers, constructors, etc. (Kaggle "Formula 1 World
-                      Championship" dataset)
-data/raw/fastf1/   — Per-lap telemetry extracts (2018–2024) via the FastF1 Python
-                      library: Compound, TyreLife (tyre age in laps), Stint number,
-                      Position, per the official F1 timing feed.
-```
+This project builds two optimization models to answer this decision problem, both driven entirely by real historical F1 data:
 
-### 2.2 Combined dataset
-
-`scripts/build_dataset.py` joins the two sources into a single master file:
-
-```
-data/processed/combined_dataset.csv   — 161,443 rows, one row per (driver, lap),
-                                         seasons 2018–2024.
-```
-
-**Join key:** `[Year, Race, Driver, Lap]`
-
-**Schema:**
-
-| Column | Type | Meaning |
-|---|---|---|
-| `raceId` | int | Kaggle race identifier |
-| `Year` | int | Season |
-| `Race` | string | Grand Prix name |
-| `Driver` | string | 3-letter driver code |
-| `Team` | string | Constructor |
-| `Lap` | int | Lap number |
-| `LapTime` | string | `M:SS.sss` format |
-| `Position` | int | Track position at end of lap |
-| `Compound` | string | Tyre compound label |
-| `TyreLife` | float | Tyre age in laps (resets to 1 at each pit stop) |
-| `Stint` | float | Stint index (increments at each pit stop) |
-| `pit_duration` | float | Pit-stop duration in seconds, `NaN` if no stop that lap |
-
-This file is treated as a **fixed, pre-validated artifact** — it is never rebuilt or modified during normal runs. All access goes through one interface: `DatasetLoader` (`src/f1_optimizer/common/data/dataset_loader.py`), which:
-- caches the CSV in memory,
-- coerces `LapTime` strings and `Lap`/`pit_duration` numerics,
-- exposes `get_race_dataframe(year, race_name, driver_code)` to pull exactly the rows needed for one optimization run.
-
-### 2.3 Lap-time string parsing
-
-`src/f1_optimizer/common/utils/time_utils.py`:
-
-$$
-\text{seconds} = \begin{cases} 60 \cdot \text{minutes} + \text{seconds} & \text{if "M:SS.sss" format} \\ \text{seconds} & \text{if plain seconds} \end{cases}
-$$
-
-Implemented with a regex `(?:(\d+):)?(\d+(?:\.\d+)?)` so both `"1:28.176"` and `"88.176"` parse correctly. This is the single utility used everywhere a lap time needs to become a float.
+- **Model 1** ignores the risk trade-off entirely and simply finds whatever strategy produces the lowest total race time.
+- **Model 2** takes that same question but adds the realistic trade-offs — it is willing to accept a small time penalty in exchange for fewer pit stops and safer tyre usage, weighted according to how much the user cares about each of those three things.
 
 ---
 
-## 3. Parameter Estimation from Data
+## 2. Where the Data Comes From
 
-Every mathematical parameter fed into the two models is **derived from real data**, computed in `BackendOptimizationRunner` (`backend/app/services/runner.py`). This section documents exactly how.
+The project uses two publicly available sources of historical Formula 1 data, which are merged together into one combined dataset:
 
-### 3.1 Available compounds, $C$
+- A **Kaggle historical database**, which covers every Formula 1 race since 1950 and includes race results, lap times, and pit stop records.
+- **FastF1 telemetry data**, a more detailed, lap-by-lap data source covering the 2018–2024 seasons, which records exactly which tyre compound was on the car each lap, how old that tyre was (in laps), and which "stint" (the period between pit stops) each lap belonged to.
 
-```
-_get_available_compounds(race_df)
-```
-Takes the literal set of `Compound` values present in that race's rows (uppercased), removes junk values (`NAN`, `UNKNOWN`, `NONE`, `""`), and orders them softest → hardest using a fixed Pirelli softness ranking:
+These two sources are combined into a single master file: `data/processed/combined_dataset.csv`. It has one row for every lap driven by every driver, across every race from 2018 to 2024 — about 161,000 rows in total. Each row records, among other things:
 
-$$
-\text{HYPERSOFT} \prec \text{ULTRASOFT} \prec \text{SUPERSOFT} \prec \text{SOFT} \prec \text{MEDIUM} \prec \text{HARD} \prec \text{INTERMEDIATE} \prec \text{WET}
-$$
+- which year and race the lap belongs to,
+- which driver and team,
+- the lap number,
+- the actual lap time (e.g. "1:28.176"),
+- which tyre compound was fitted,
+- how many laps old that tyre was,
+- which stint (pit-stop period) the lap belongs to,
+- and, if that lap included a pit stop, how long the stop took.
 
-This means $C$ is **race-specific** (a 2018 race might have 3 compounds from `{HYPERSOFT, SUPERSOFT, SOFT}`; a 2023 race uses `{SOFT, MEDIUM, HARD}`), rather than a hardcoded fixed set. If nothing usable is found, it defaults to `["SOFT", "MEDIUM", "HARD"]`.
+This combined file is treated as a finished, trustworthy dataset — the project never rebuilds or edits it during normal use. All parts of the system read from it through a single, shared piece of code (the "dataset loader"), so there's only one place responsible for correctly loading and filtering this data.
 
-### 3.2 Baseline pace per compound, $\text{Base}_c$
-
-```
-_get_compound_base_pace(compounds, race_df)
-```
-Mean real lap time (in seconds) for each compound, with a three-level fallback:
-
-$$
-\text{Base}_c = \begin{cases}
-\text{mean lap time for } c \text{ in this specific race} & \text{if that race has laps on } c \\
-\text{mean lap time for } c \text{ across the whole 2018–2024 dataset} & \text{if not, but other races do} \\
-\text{mean lap time across all compounds, dataset-wide} & \text{as a last resort}
-\end{cases}
-$$
-
-Why race-specific first: lap time is dominated by circuit characteristics (e.g. Monaco ≈ 82s vs. a global Soft average ≈ 97s pooled across every circuit). Using the race's own laps keeps the baseline physically meaningful for that circuit.
-
-### 3.3 Degradation rate per compound, $\alpha_c$
-
-```
-_get_compound_degradation_rate(compounds, race_df)  →  _fit_degradation_rates(df)
-```
-
-For each compound, an ordinary least-squares **linear regression** of lap time against tyre age is fit:
-
-$$
-\text{LapTime} = \text{Base}_c + \alpha_c \cdot \text{TyreAge}
-$$
-
-Implemented as a slope using covariance/variance (equivalent to simple linear regression):
-
-$$
-\alpha_c = \frac{\operatorname{Cov}(\text{TyreLife}, \text{LapSeconds})}{\operatorname{Var}(\text{TyreLife})}
-$$
-
-**Rules applied:**
-- Needs at least 5 rows and at least 2 distinct tyre-age values for that compound, otherwise that compound is skipped (falls through to the dataset-wide fit, then to $\alpha_c = 0$).
-- The slope is **floored at 0**: $\alpha_c = \max(\alpha_c, 0)$. A tyre is never modeled as getting *faster* with age — a negative raw slope only appears when fuel burn-off or traffic dominates the signal, which is a confound, not real degradation.
-- Same race-specific → dataset-wide → 0.0 fallback order as baseline pace.
-
-(`src/f1_optimizer/common/tyre/degradation_model.py` contains an equivalent, more general `TyreDegradationModel.fit_compound_degradation` using `numpy.polyfit` across every lap of a given compound — same floored-OLS idea — kept as the common/reusable version of this fit.)
-
-### 3.4 Predicted lap time, $T_{l,c}$
-
-```
-_build_predicted_lap_times(df, compounds, total_laps)
-```
-
-$$
-T_{l,c} = \text{Base}_c + \alpha_c \cdot l \qquad \forall\, l \in \{1, \dots, N\},\ c \in C
-$$
-
-Note this uses the **absolute lap number** $l$ as the age proxy inside the lookup table (not stint-relative age) — the stint-relative tyre age is reconstructed later by the model itself (see §4 and §6) when it needs to know how long a tyre has actually been on the car within its *current* stint. The raw table $T_{l,c}$ simply answers "how fast would compound $c$ be if it had been on since lap 1" for every lap; the model's own stint-tracking logic is what correctly resets the effective age at each pit stop.
-
-Why the fitted curve and not raw per-lap averages: raw per-lap data is noisy (fuel load changes every lap, traffic, Safety Car laps), so a smooth fitted line is used everywhere for consistency instead.
-
-### 3.5 Pit-stop time loss, $P$
-
-```
-_get_pit_loss_seconds(year, race_name)
-```
-
-Mean real `pit_duration` (seconds), filtered to a sane physical range $[10, 60]$ seconds to exclude data errors, with a three-level fallback identical in spirit to §3.2:
-
-$$
-P = \begin{cases}
-\text{mean pit\_duration for this exact (year, race)} \\
-\text{mean pit\_duration for this circuit, any year} \\
-\text{mean pit\_duration across the whole dataset (fallback } \approx 13\text{s)}
-\end{cases}
-$$
-
-This matters because pit-lane length varies hugely by circuit — the dataset shows ≈20.6s at Australia vs. ≈32.7s at Imola. (This also resolves the slide-deck's own internal ambiguity between "$P \approx 13$s" on the MILP slide and "$\approx 20$s" on the background slide — $P$ is computed per race rather than fixed.)
-
-### 3.6 Maximum durable stint length per compound, $L_c^{\max}$
-
-```
-_get_max_stint_durability(compounds, race_df, total_laps, max_stints)
-```
-
-Computed as the **mean of the maximum `TyreLife` reached per real stint**, per compound (`TyreStatisticsCalculator.calculate_mean_max_stint_life`):
-
-$$
-L_c^{\max} = \max\!\left(1, \ \operatorname{round}\!\big(\operatorname{mean}_{\text{stints of } c}(\max \text{TyreLife in that stint})\big)\right)
-$$
-
-Same race-specific → dataset-wide fallback pattern, and additionally floored so the chosen number of stints can actually cover the race:
-
-$$
-L_c^{\max} \ge \left\lceil \frac{N}{\text{max\_stints}} \right\rceil, \qquad \text{max\_stints} = \text{min\_pit\_stops} + 1
-$$
-
-(so a durability estimate that's too small to ever complete the race, given how many stints the user requires, is automatically raised to the minimum geometrically necessary.)
-
-### 3.7 User-configurable inputs
-
-These are **not fit from data** — they come directly from the user's request, validated/clamped by `_resolve_strategy_constraints`, `_resolve_max_pit_stops`, `_resolve_max_sets_per_compound`, `_resolve_max_risk_tier_per_compound`:
-
-| Parameter | Meaning | Default when blank |
-|---|---|---|
-| `min_pit_stops` | Hard floor on number of stops | 0 |
-| `max_pit_stops` (Model 2 only) | Hard ceiling on number of stops; also sets Goal 2's target $P^*$ | `min_pit_stops` itself |
-| `min_stint_length` | Minimum laps any stint must run once started | data-driven: the race's real 5th-percentile stint length, capped at 5 |
-| `max_sets_per_compound` | How many separate stints (tyre sets) of each compound are allowed | 0 per compound (i.e. unusable unless specified) |
-| `max_risk_tier_per_compound` (Model 2 only) | Optional hard ceiling on degradation-risk tier per compound | none (no ceiling) |
-| `weights` $(w_1, w_2, w_3)$ (Model 2 only) | Relative priority across the three goals | $0.50/0.25/0.25$ |
-
-Two design decisions worth calling out:
-- There is **no silent clamping** of contradictory inputs (e.g. `max_pit_stops < min_pit_stops`) — the system raises a clear, actionable error instead of guessing what the user meant.
-- `max_sets_per_compound` has **no auto-default** besides 0 — if the user doesn't explicitly allocate tyre sets to a compound, that compound is unusable. This models the real constraint that teams bring a finite, pre-declared allocation of tyres to a race weekend.
+Lap times are stored as text in the format minutes:seconds (for example `"1:28.176"` means one minute and 28.176 seconds). A small utility function converts this text into a plain number of seconds wherever the models need to do arithmetic with it, by reading an optional minutes part followed by a required seconds part.
 
 ---
 
-## 4. Model 1 — MILP: Fastest Possible Strategy
+## 3. Turning Raw Data Into Model Inputs
 
-**File:** `src/f1_optimizer/scope1/model/milp_model.py`
-**Goal:** find the single fastest theoretical strategy — pit-stop laps, compound per stint — subject to physical/regulatory constraints.
+Before either model can run, the system needs to work out several numbers from the real race data: how fast each tyre compound is, how quickly it degrades, how much a pit stop costs at this particular circuit, and how long a tyre can safely last. Nothing here is a textbook assumption — every one of these numbers is calculated directly from the actual lap times and pit stops recorded for the selected race (falling back to data from other races only when the selected race doesn't have enough of its own).
 
-### 4.1 Sets
+### 3.1 Which tyre compounds are actually available
 
-- $l \in \{1, 2, \dots, N\}$ — race laps.
-- $c \in C$ — tyre compounds present in this race's data (§3.1).
+The system looks at which compound names actually appear in the chosen race's data, removes anything meaningless (blank values, "unknown", etc.), and sorts them from softest to hardest using the real Pirelli compound hierarchy (Hypersoft, Ultrasoft, Supersoft, Soft, Medium, Hard, Intermediate, Wet). This means the set of usable compounds is specific to each individual race, rather than being hard-coded as always "Soft, Medium, Hard" — a 2018 race might offer Hypersoft/Supersoft/Soft, while a 2023 race offers Soft/Medium/Hard.
 
-### 4.2 Decision variables
+### 3.2 How fast each compound is when fresh — the baseline pace
 
-| Variable | Domain | Meaning |
+For every compound, the system calculates the *average* lap time recorded on that compound, preferring laps from this exact race first (because lap time is mostly determined by how long and how fast the specific circuit is — a lap at Monaco takes about 82 seconds, while the average Soft-tyre lap time across every circuit in the whole dataset is closer to 97 seconds, so using the whole dataset's average for a Monaco race would be badly wrong). If the chosen race doesn't have enough laps on a particular compound, the system falls back to that compound's average across the entire multi-year dataset, and only as a last resort falls back to the average lap time across all compounds combined.
+
+Call this baseline pace for compound $c$ simply "Base of $c$" — it represents how fast that tyre runs on lap 1, before any wear has happened.
+
+### 3.3 How quickly each compound slows down — the degradation rate
+
+The system fits a straight line through real data: lap time versus tyre age (in laps), for every lap recorded on a given compound. This is ordinary linear regression — the same statistical method used to find a "line of best fit" through a scatter of points. The slope of that line tells us, on average, how many extra seconds a lap takes for every additional lap of tyre age. The intercept of that line (where it crosses zero tyre age) is used as a cross-check against the baseline pace described above.
+
+Two safety rules are applied to this fit:
+
+- If a compound doesn't have at least 5 recorded laps with at least two different tyre ages, there isn't enough information to fit a reliable line, so the system falls back to the dataset-wide fit for that compound, and ultimately to a degradation rate of zero (meaning "assume no wear effect") only if there's truly no usable data anywhere.
+- The slope is never allowed to come out negative. Physically, a tyre cannot get *faster* as it wears — if the raw statistical fit produces a negative number, that's a sign the result is being distorted by something else (cars get lighter and faster as they burn off fuel over a race, or traffic from other cars slows a lap down), not a real sign of tyres improving with age. So any negative result is floored at zero.
+
+Call this degradation rate for compound $c$ "Degradation rate of $c$," measured in seconds lost per lap of tyre age.
+
+### 3.4 Predicting the lap time for any lap and any compound
+
+Combining the two numbers above, the predicted lap time for lap number $l$ on compound $c$ is simply:
+
+$$
+T_{l,c} = \text{Base of } c \;+\; (\text{Degradation rate of } c) \times l
+$$
+
+In words: the baseline pace for that compound, plus the degradation rate multiplied by how many laps into its life the tyre is. This table of predicted lap times (one number for every combination of lap and compound) is what both optimization models use to judge how fast any given strategy would be. The models themselves are responsible for correctly resetting a tyre's "age" to zero whenever a pit stop happens, so a compound's effective age is always counted from the start of its current stint, not from the start of the race.
+
+The project deliberately uses this smooth, fitted curve rather than the raw, noisy lap-by-lap averages, because real lap times bounce around for reasons that have nothing to do with tyre wear — changing fuel load, traffic from other cars, and safety car periods. A smooth fitted curve gives a much more consistent and trustworthy prediction.
+
+### 3.5 How much a pit stop costs — the pit-loss time
+
+The system calculates the *average* real pit-stop duration recorded for the selected race (restricting to realistic values between 10 and 60 seconds, to exclude obvious data errors). If the selected race doesn't have enough pit-stop records of its own, it falls back to the average for that circuit across all years, and finally to the average across the entire dataset (which comes out to roughly 13 seconds) if nothing more specific is available.
+
+This matters a lot because pit lanes are physically very different in length and speed limit from circuit to circuit — the data shows an average pit stop costing around 21 seconds at the Australian Grand Prix, but around 33 seconds at Imola. Using a single fixed number for every circuit would be unrealistic, so this value — call it $P$ — is always calculated specifically for the race being analyzed.
+
+### 3.6 How long a tyre can safely last — the maximum stint length
+
+For every compound, the system looks at every real stint recorded on that compound (a "stint" being the continuous run on one set of tyres between pit stops) and calculates the *average* of the maximum tyre age reached in each of those stints. In other words: on average, how old did this compound's tyres get before the driver pitted? That average, rounded to a whole number of laps, becomes the maximum durable stint length for that compound — call it $L_c^{\max}$.
+
+As with the other parameters, this prefers the selected race's own data first, falling back to the dataset-wide average if needed. It is also never allowed to come out smaller than what would be mathematically necessary to actually finish the race given however many pit stops are required — if the required number of stints is large and each one must therefore be short, the estimate is nudged upward to the smallest value that still makes finishing the race possible.
+
+### 3.7 Settings the user controls directly
+
+A handful of inputs are not calculated from data at all — they come directly from whoever is running the model, through the web interface:
+
+| What the user can set | What it controls | What happens if left blank |
 |---|---|---|
-| $x_{l,c}$ | $\{0,1\}$ | 1 if compound $c$ is the active tyre on lap $l$ |
-| $p_l$ | $\{0,1\}$ | 1 if a pit stop occurs between lap $l$ and lap $l+1$ |
-| $s_{l,c}$ | $\{0,1\}$ | 1 if a **new stint** on compound $c$ starts on lap $l$ (i.e. compound $c$ is active on lap $l$ but was not active on lap $l-1$) |
+| Minimum pit stops | The fewest stops the strategy is allowed to make | No minimum (0) |
+| Maximum pit stops (Model 2 only) | The most stops the strategy is allowed to make — also becomes the pit-stop *target* that Model 2 tries to stay close to | Defaults to whatever the minimum was set to |
+| Minimum stint length | The fewest laps any single stint must run once it begins | A sensible data-driven default (the shortest 5% of real stints seen in this race, capped at 5 laps) |
+| Maximum sets per compound | How many separate times each compound can be used (teams only bring a limited number of tyre sets to a race) | Zero — meaning that compound cannot be used at all unless the user explicitly allows it |
+| Maximum acceptable wear-risk tier per compound (Model 2 only) | An optional hard safety limit — e.g. "never let the Soft tyre get past Moderate wear" | No limit |
+| Priority weights (Model 2 only) | How much the user cares about speed vs. avoiding pit stops vs. avoiding tyre wear, as three numbers that must add up to 1 | A default split of 50% speed, 25% fewer pit stops, 25% tyre safety |
 
-### 4.3 Parameters
-
-| Symbol | Meaning | Source |
-|---|---|---|
-| $T_{l,c}$ | Predicted lap time | §3.4 |
-| $P$ | Pit-stop time loss | §3.5 |
-| $L_c^{\max}$ | Max durable stint length | §3.6 |
-| $N$ | Total race laps | race data |
-| $\text{min\_pit\_stops}$ | Floor on stop count | §3.7 |
-| $\text{min\_stint\_length}$ | Floor on any stint's length | §3.7 |
-| $\text{max\_sets}_c$ | Ceiling on number of stints of compound $c$ | §3.7 |
-
-### 4.4 Objective function
-
-$$
-\min T_{\text{race}} = \sum_{l=1}^{N} \sum_{c \in C} T_{l,c}\, x_{l,c} \;+\; P \sum_{l=1}^{N-1} p_l
-$$
-
-Total predicted race time = sum of the lap time actually driven on each lap, plus the time lost to however many pit stops are made.
-
-### 4.5 Constraints
-
-**(a) Compound exclusivity** — exactly one compound is on the car every lap:
-$$
-\sum_{c \in C} x_{l,c} = 1 \qquad \forall\, l \in \{1,\dots,N\}
-$$
-
-**(b) Pit-stop detection (linking $p_l$ to compound changes)** — a pit stop is logically *defined* as any lap-to-lap compound change:
-$$
-p_l \ge x_{l,c} - x_{l+1,c} \qquad \text{and} \qquad p_l \ge x_{l+1,c} - x_{l,c} \qquad \forall\, l \in \{1,\dots,N-1\},\ \forall c \in C
-$$
-These two inequalities together force $p_l = 1$ whenever *any* compound's indicator differs between consecutive laps, and allow $p_l = 0$ only when every compound's indicator is unchanged. ($p_l$ is not separately forced to 0 when nothing changes, but the minimization objective does that automatically since $P>0$ and $p_l$ only appears as a cost.)
-
-**(c) Minimum pit-stop count:**
-$$
-\sum_{l=1}^{N-1} p_l \ \ge\ \text{min\_pit\_stops}
-$$
-
-**(d) Stint bookkeeping — defining $s_{l,c}$:**
-$$
-s_{l,c} \le x_{l,c} \qquad \forall l,c
-$$
-$$
-s_{1,c} = x_{1,c}
-$$
-$$
-s_{l,c} \le 1 - x_{l-1,c}, \qquad s_{l,c} \ge x_{l,c} - x_{l-1,c} \qquad \forall l>1,\ \forall c
-$$
-Together these force $s_{l,c}=1$ exactly when compound $c$ is newly activated on lap $l$ (active now, inactive the lap before), and $0$ otherwise.
-
-**(e) Minimum stint length** — any stint that starts must run for at least `min_stint_length` laps (unless the race ends first):
-$$
-\sum_{l'=l}^{\min(N,\, l+\text{min\_stint\_length}-1)} x_{l',c} \ \ge\ \text{min\_stint\_length} \cdot s_{l,c} \qquad \forall l,c
-$$
-If $s_{l,c}=1$ (a stint truly starts here), the left side must count at least `min_stint_length` consecutive active laps on $c$ starting at $l$; if $s_{l,c}=0$ the constraint is vacuous.
-
-**(f) Tyre durability** — any stint that starts cannot run longer than that compound's durable limit $L_c^{\max}$, enforced with a Big-M relaxation that only binds when the stint truly started at $l$:
-$$
-\sum_{l'=l}^{\min(N,\, l+L_c^{\max})} x_{l',c} \ \le\ L_c^{\max} + (N+1)\,(1 - s_{l,c}) \qquad \forall l,c
-$$
-When $s_{l,c}=1$, this caps the window's active-lap count at $L_c^{\max}$. When $s_{l,c}=0$, the Big-M term $(N+1)$ makes the constraint non-binding.
-
-**(g) At most one stint starts per lap:**
-$$
-\sum_{c \in C} s_{l,c} \ \le\ 1 \qquad \forall l
-$$
-
-**(h) Tyre-set allocation ceiling** — the number of separate stints run on compound $c$ cannot exceed the sets allocated to it (this is the real-world cap on how many times a compound can be used, since each stint consumes one physical tyre set):
-$$
-\sum_{l=1}^{N} s_{l,c} \ \le\ \text{max\_sets}_c \qquad \forall c \in C
-$$
-
-**(i) Binary integrality:**
-$$
-x_{l,c},\ p_l,\ s_{l,c} \ \in\ \{0,1\}
-$$
-
-Note: **full race distance coverage** ($\sum_i \text{stint}_i = N$) is not a separate constraint — it falls out automatically from (a) (exactly one compound active every lap, for all $N$ laps).
-
-### 4.6 Output
-
-The optimal $x_{l,c}^*$, $p_l^*$ give:
-1. Optimal pit-stop laps.
-2. Compound fitted in each stint.
-3. Minimum predicted total race time $T^* = T_{\text{race}}^*$.
-
-This $T^*$ is the number later fed into Model 2 as the "fastest achievable" benchmark (§9).
+Two things are worth understanding about how these are handled: first, if a user enters contradictory values (for example, a maximum pit-stop count lower than the minimum they also set), the system does not silently fix this for them — it stops and explains clearly what is wrong, so the user can correct it themselves rather than unknowingly getting a result based on a guess about what they "really meant." Second, the tyre-set allowance has no automatic default beyond zero: if a user doesn't explicitly say how many sets of a compound are available, the model assumes none are — mirroring the real-world fact that a team only brings a specific, limited number of tyre sets to each race weekend, and cannot use a compound it didn't bring enough of.
 
 ---
 
-## 5. Model 2 — Goal Programming: Balanced Strategy
+## 4. Model 1: Finding the Fastest Possible Strategy
 
-**File:** `src/f1_optimizer/scope2/model/goal_model.py`
-**Motivation:** real teams rarely optimize on raw speed alone. Extra pit stops carry operational risk (a stuck wheel gun, a cross-threaded nut, an unsafe release); pushing a tyre too far risks a sudden loss of grip or a structural failure. Model 2 finds a **balanced** strategy that trades a controlled, small amount of race time for fewer stops and lower tyre-degradation risk, according to team-assigned priorities.
+Model 1 answers one question only: ignoring every other consideration, what is the single fastest possible way to run this race? It is built as a type of optimization model called a **Mixed-Integer Linear Program**, or MILP — "mixed-integer" because some of its decisions are whole numbers (specifically, yes/no decisions), and "linear" because the objective and all its rules can be written as simple additions and multiplications, which is what lets a solver search through the possibilities efficiently and guarantee it has found the true best answer (not just a good one).
 
-### 5.1 All of Model 1's variables and constraints, plus:
+### 4.1 What the model is deciding, lap by lap
 
-Model 2 reuses every decision variable and constraint from §4.2–§4.5 ($x_{l,c}$, $p_l$, $s_{l,c}$, constraints (a)–(i)), **with one addition**: a genuine hard **ceiling** on pit stops (Model 1 only has a floor):
-$$
-\text{min\_pit\_stops} \ \le\ \sum_{l=1}^{N-1} p_l \ \le\ \text{max\_pit\_stops}
-$$
+For every single lap of the race, and for every tyre compound that's available in this race, the model has a yes/no decision: *is this compound the one fitted to the car on this lap?* Call this decision $x_{l,c}$ — it equals 1 if compound $c$ is active on lap $l$, and 0 otherwise.
 
-Then it adds the goal-programming machinery below.
+The model also has a yes/no decision for every lap: *does a pit stop happen right after this lap?* Call this $p_l$ — it equals 1 if the car pits after lap $l$, 0 otherwise.
 
-### 5.2 Additional decision variables
+Finally, it needs to know exactly when a *new* stint begins — the first lap a given compound is used after not being used the lap before. Call this $s_{l,c}$ — it equals 1 if compound $c$ is freshly fitted at the start of lap $l$.
 
-| Variable | Domain | Meaning |
-|---|---|---|
-| $d_1^+, d_1^-$ | $\ge 0$ | Over-/under-achievement deviation, Goal 1 (time) |
-| $d_2^+, d_2^-$ | $\ge 0$ | Over-/under-achievement deviation, Goal 2 (pit stops) |
-| $d_3^+, d_3^-$ | $\ge 0$ | Over-/under-achievement deviation, Goal 3 (degradation risk) |
-| $\text{age}_{l,c}$ | Integer $\ge 0$ | Consecutive laps compound $c$ has run, counting lap $l$ itself (see §6) |
-| $\ell_{l,c,k}$ for $k\in\{1,2,3\}$ | $\{0,1\}$ | 1 iff $\text{age}_{l,c} \le$ tier-$k$ threshold (see §6) |
+### 4.2 What the model already knows (the inputs)
 
-### 5.3 The three goals
+Everything calculated above feeds directly into the model:
 
-Each goal equation is **normalized by its own target** so the three deviations $d_1^+, d_2^+, d_3^+$ are comparable *fractional* quantities (0 = exactly on target) rather than raw units of wildly different scale (seconds vs. a stop count vs. a unitless risk score). Without normalization, the weights $w_1, w_2, w_3$ could not meaningfully trade off against each other.
+- $T_{l,c}$ — the predicted lap time for compound $c$ on lap $l$ (Section 3.4).
+- $P$ — the pit-stop time cost for this circuit (Section 3.5).
+- $L_c^{\max}$ — the maximum safe stint length for compound $c$ (Section 3.6).
+- $N$ — the total number of laps in the race.
+- The user's minimum pit-stop count, minimum stint length, and tyre-set allowances (Section 3.7).
 
-**Goal 1 — Race time.** Target $T^*$ = Model 1's own solved optimum (§4.6):
-$$
-\frac{T}{T^*} + d_1^- - d_1^+ = 1
-$$
-where $T = \sum_{l,c} T_{l,c}\,x_{l,c} + P\sum_l p_l$ (identical expression to Model 1's objective). Since $T^*$ is the *unconstrained* minimum, in practice $T \ge T^*$ always, so $d_1^-$ stays 0 and $d_1^+$ is the fractional time penalty this balanced strategy accepts.
+### 4.3 The goal: minimize total race time
 
-**Goal 2 — Pit-stop count.** Target $P^*$ = the user's `max_pit_stops` input, taken directly:
-$$
-\frac{P_{\text{stops}}}{P^*} + d_2^- - d_2^+ = 1
-$$
-where $P_{\text{stops}} = \sum_l p_l$. Because `max_pit_stops` is *also* enforced as a genuine hard ceiling (§5.1), $d_2^+$ in practice only measures how far the chosen strategy sits below that ceiling when it's being used as a *preferred* value, not just a maximum.
-
-**Goal 3 — Degradation risk.** Target $R^*$ = the true minimum risk score achievable under this race's actual constraints (computed by a dedicated solver pass — see §6.4):
-$$
-\frac{R}{R^*} + d_3^- - d_3^+ = 1
-$$
-where $R$ is the strategy's total degradation-risk score (defined fully in §6).
-
-If a target is $0$ (edge case), the corresponding equation falls back to its **un-normalized** raw-unit form instead of dividing by zero.
-
-### 5.4 Objective function
+The model's objective is to choose values for every $x_{l,c}$ and $p_l$ that make the total predicted race time as small as possible. Total race time is simply the sum of the predicted lap time actually driven on every lap, plus the time lost to however many pit stops happen:
 
 $$
-\min Z = w_1 d_1^+ + w_2 d_2^+ + w_3 d_3^+
-$$
-subject to
-$$
-w_1 + w_2 + w_3 = 1, \qquad w_1, w_2, w_3 \ge 0
+\min T_{\text{race}} = \sum_{\text{every lap } l} \sum_{\text{every compound } c} T_{l,c} \cdot x_{l,c} \;+\; P \times (\text{total number of pit stops})
 $$
 
-Only the **overshoot** terms are penalized. Undershooting a target — finishing faster than $T^*$ (impossible, since $T^*$ is the true minimum), making fewer stops than $P^*$, or achieving lower risk than $R^*$ — is never penalized; $d_k^-$ exists purely so each goal equation can still balance to 1 in that case.
+### 4.4 The rules the model must obey
 
-**Default weights** (PPT Slide 14 convention, enforced to sum to 1 by `GoalWeights`):
+A solver cannot just pick whatever makes the objective smallest with no restrictions — that would produce nonsense, like running every lap on the fastest tyre forever with no wear and no pit stops. The following rules keep the model physically and strategically realistic:
+
+**Exactly one tyre at a time.** On any given lap, exactly one compound must be the active one — not zero, not two:
 $$
-w_1 = 0.50 \ (\text{time}), \quad w_2 = 0.25 \ (\text{pit stops}), \quad w_3 = 0.25 \ (\text{tyre preservation})
+\sum_{\text{every compound } c} x_{l,c} = 1 \qquad \text{for every lap } l
 $$
-User-adjustable through the UI.
 
-### 5.5 Optional hard safety ceiling (separate from Goal 3)
+**A pit stop is whatever causes a compound change.** The model defines a pit stop as happening precisely when the active compound on one lap differs from the active compound on the next lap. This is enforced with two rules that together force the pit-stop decision to "turn on" whenever any compound's status flips between consecutive laps:
+$$
+p_l \ge x_{l,c} - x_{l+1,c} \qquad \text{and} \qquad p_l \ge x_{l+1,c} - x_{l,c}
+$$
+for every lap $l$ and every compound $c$. (The model is never forced to report a pit stop that didn't happen, because the objective function is trying to *minimize* the number of pit stops in the first place — there's no incentive to claim an extra one.)
 
-A user can additionally set `max_risk_tier_per_compound` — e.g. "never let SOFT exceed the Moderate tier." This is enforced as an **absolute hard constraint** (detailed in §6.3), independent of the weights — it is a safety bound layered *underneath* Goal 3's soft preference, not a replacement for it.
+**At least the minimum number of pit stops the user required:**
+$$
+\text{total pit stops} \ge \text{minimum pit stops}
+$$
 
-### 5.6 Output
+**Correctly identifying when a new stint starts.** A new stint on compound $c$ begins at lap $l$ exactly when that compound is active on lap $l$ but was not active on the lap before. A set of linked rules captures this logic precisely, so that $s_{l,c}$ is forced to 1 only in that exact situation and 0 in every other case.
 
-1. Balanced stint structure and pit-stop laps.
-2. Achieved race time $T_{\text{balanced}}$.
-3. Trade-off delta $\Delta T = T_{\text{balanced}} - T^*$ (e.g. "+1.9s to save one pit stop").
-4. Achieved deviations $d_1^+, d_2^+, d_3^+$ and the realized risk score $R$.
-5. A side-by-side comparison against Model 1.
+**No stint shorter than the minimum allowed length.** If a stint starts at lap $l$, the model must keep that same compound active for at least the minimum stint length the user set (unless the race itself ends first):
+$$
+(\text{active laps on compound } c \text{ from } l \text{ through the required minimum window}) \ge (\text{minimum stint length}) \times s_{l,c}
+$$
+This only has any effect when a stint truly starts at lap $l$ — otherwise it has no bite.
+
+**No stint longer than that compound's safe maximum.** Symmetrically, if a stint on compound $c$ starts at lap $l$, it cannot run for more laps than that compound's maximum durable stint length $L_c^{\max}$ allows, again only enforced when a stint genuinely starts there.
+
+**Only one new stint can start per lap** — a car cannot begin two different tyre stints simultaneously on the same lap.
+
+**A limited number of tyre sets per compound.** The total number of separate stints run on compound $c$, across the whole race, cannot exceed however many sets of that compound the user said were available — because each stint uses up one physical set of tyres:
+$$
+\text{total stints on compound } c \le \text{maximum sets of compound } c
+$$
+
+**All decisions are yes/no.** Every $x_{l,c}$, $p_l$, and $s_{l,c}$ can only take the value 0 or 1 — there's no such thing as "half" a tyre compound being active.
+
+One rule that might seem necessary but turns out not to be: making sure the stints add up to exactly the full race distance. This happens automatically, because the "exactly one compound active every lap" rule already applies to every single lap of the race from the first to the last — so the stints can never do anything other than cover the whole race exactly once.
+
+### 4.5 What comes out of Model 1
+
+Once solved, Model 1 tells us:
+
+1. Exactly which laps to pit on.
+2. Which compound to use in each resulting stint.
+3. The minimum possible total race time achievable under these rules — call this number $T^{*}$ ("T-star"). This number becomes important again in Model 2, described next, as the benchmark against which a more balanced strategy is measured.
 
 ---
 
-## 6. Degradation-Risk Scoring (Goal 3 in depth)
+## 5. Model 2: Finding a Balanced, Realistic Strategy
 
-This is the most intricate part of the model, so it gets its own section.
+Model 1 answers "what's the fastest possible strategy," full stop. But real race engineers rarely want that in isolation — extra pit stops carry real operational risk (a wheel gun can jam, a wheel nut can be cross-threaded, a release can be unsafe if timed badly), and pushing a tyre well past its comfortable working life risks a sudden, dangerous loss of grip. Model 2 is built to find a strategy that is still fast, but deliberately balances speed against these two other concerns, according to how much the user says they care about each one.
 
-### 6.1 Why not a flat index?
+This kind of model is called **Goal Programming**. Instead of a single objective to minimize, it works with several *goals* — target values the user would like to hit — and tries to get as close to all of them as possible at once, where "as close as possible" is itself defined by user-chosen priorities.
 
-An early design used a static per-compound risk label. The implemented version instead makes risk a genuine **per-lap, age-aware** score: a strategy that runs a compound deep into its high-wear zone costs more here, even if it happens to be marginally faster — so risk is a real trade-off the optimizer weighs, not a fixed label attached to a compound name.
+### 5.1 It starts from everything Model 1 already has
 
-### 6.2 Tracking tyre age inside the MILP ($\text{age}_{l,c}$)
-
-Tyre age must reset to 1 every time a new stint starts and increment by 1 every other active lap — this is inherently a *conditional* reset, which is non-linear unless encoded carefully with Big-M logic. For each compound $c$, let $\text{big\_m}_c = L_c^{\max} + 1$ (scoped **per compound**, not to the full race distance $N$ — this keeps the LP relaxation much tighter, which matters for solver speed given how many binary variables this model already has):
-
+Model 2 reuses every decision, parameter, and rule from Model 1 exactly as described above — the lap-by-lap compound decisions, the pit-stop detection logic, the minimum stint length rule, the maximum durability rule, and the tyre-set allowance rule. It adds exactly one new rule on top: Model 1 only enforces a *minimum* number of pit stops, but Model 2 also enforces a genuine *maximum*, because the user can set an upper limit on stops for Model 2 specifically:
 $$
-\text{age}_{l,c} \ \le\ \text{big\_m}_c \cdot x_{l,c} \qquad \forall l,c
-$$
-(age is 0 whenever the compound isn't active that lap.)
-
-For $l=1$:
-$$
-\text{age}_{1,c} = x_{1,c}
+\text{minimum pit stops} \le \text{total pit stops} \le \text{maximum pit stops}
 $$
 
-For $l>1$, let $a' = \text{age}_{l-1,c}$ (previous lap's age):
+### 5.2 Three competing goals
+
+Model 2 is given three targets, and it tries to get close to all three simultaneously, weighted by priority:
+
+**Goal 1 — Race time.** The target is $T^{*}$, the true fastest time Model 1 found for this exact race under these exact user settings. Model 2 is never expected to beat this time (it's the mathematically fastest possible), but it's allowed to come in slower than it, by some amount, if that buys a better outcome on the other two goals.
+
+**Goal 2 — Number of pit stops.** The target is simply the maximum pit-stop count the user chose. Because that same number is also enforced as a hard ceiling (Section 5.1), this goal really expresses a *preference* to stay close to that chosen number rather than just technically staying under it.
+
+**Goal 3 — Tyre wear risk.** The target is the lowest possible total wear-risk score achievable for this specific race under these specific settings — how exactly that risk score is calculated is explained fully in the next section. Unlike the first two goals, this target is not something simple to state in one line; it is found by actually solving a smaller version of this same model once, with the sole aim of minimizing wear risk and nothing else, before the real balanced solve happens. This mirrors how the race-time target above is itself the genuine solved optimum from Model 1, rather than a guessed number.
+
+### 5.3 Making the three goals comparable
+
+Race time is measured in seconds, pit-stop count is a small whole number, and the wear-risk score is a unit-less number built from tier weights — three completely different scales. If the model tried to balance "a few seconds of time" against "one fewer pit stop" against "two points of risk score" directly, the weights the user sets wouldn't mean anything sensible, because a "point" of one goal doesn't correspond to a "point" of another.
+
+To fix this, every goal is converted into a *fraction of its own target* before being compared. For each goal, the model introduces two non-negative "deviation" quantities: how much the achieved value overshoots the target, and how much it undershoots it. For example, for the time goal:
+
 $$
-\text{age}_{l,c} \ \le\ a' + 1 + \text{big\_m}_c\,(1-x_{l,c})
-$$
-$$
-\text{age}_{l,c} \ \ge\ a' + 1 - \text{big\_m}_c\,(1-x_{l,c}) - \text{big\_m}_c\, s_{l,c}
-$$
-$$
-\text{age}_{l,c} \ \le\ 1 + \text{big\_m}_c\,(1-s_{l,c})
-$$
-$$
-\text{age}_{l,c} \ \ge\ 1 - \text{big\_m}_c\,(1-s_{l,c})
+\frac{T}{T^{*}} + (\text{undershoot of time goal}) - (\text{overshoot of time goal}) = 1
 $$
 
-Read together: if $x_{l,c}=0$, age is forced to 0 by the first constraint. If $x_{l,c}=1$ and $s_{l,c}=1$ (a new stint just started), the last two constraints pin $\text{age}_{l,c}=1$. If $x_{l,c}=1$ and $s_{l,c}=0$ (continuing an existing stint), the middle two constraints pin $\text{age}_{l,c} = a'+1$. `age` is declared as an **Integer** variable (not continuous) — tyre age is inherently a whole number of laps, and declaring it integer tightens the solver's branch-and-bound search versus a continuous relaxation.
+Here $T$ is the race time this particular candidate strategy actually achieves. If $T$ equals $T^{*}$ exactly, both deviation terms are zero and the equation balances at 1. If $T$ is larger than $T^{*}$ (slower), the overshoot term absorbs that difference as a fraction of $T^{*}$. Since $T^{*}$ is by definition the fastest possible time, $T$ can never legitimately be smaller than it, so the undershoot term for this particular goal always stays at zero in practice — it exists mainly so the equation always has a valid solution.
 
-### 6.3 Risk tiers
+The exact same idea is applied to the pit-stop goal (actual pit-stop count divided by the target pit-stop count) and the wear-risk goal (actual risk score divided by the target risk score). This way, an "overshoot" of 0.1 means the same thing — "10% worse than the ideal" — no matter which of the three goals it belongs to, which is what makes it meaningful to compare and weight them against each other.
 
-Tyre wear is bucketed into 4 tiers, **scaled to each compound's own real durability** $L_c^{\max}$ rather than a fixed absolute age cutoff — a compound that durably lasts 40 laps and one that lasts 20 reach the same *relative* wear state at different absolute ages.
+### 5.4 The objective: minimize the weighted overshoot
 
-Tier thresholds (`_get_degradation_risk_tiers`):
+Model 2's single objective is to minimize a weighted sum of the three overshoot amounts:
+
 $$
-t_1 = \max(1, \operatorname{round}(0.40\, L_c^{\max})), \quad t_2 = \max(t_1+1, \operatorname{round}(0.70\, L_c^{\max})), \quad t_3 = \max(t_2+1, \operatorname{round}(0.90\, L_c^{\max}))
-$$
-
-| Tier | Age range | Risk weight | Meaning |
-|---|---|---|---|
-| 0 — Low | $\text{age} \le t_1$ | 0 | Fresh tyre |
-| 1 — Moderate | $t_1 < \text{age} \le t_2$ | 1 | Normal wear |
-| 2 — High | $t_2 < \text{age} \le t_3$ | 2 | Pushing the limit |
-| 3 — Very high | $\text{age} > t_3$ | 3 | Beyond recommended life |
-
-(The 40%/70%/90% split is a physically reasonable choice, not a data fit — fitting these boundaries directly from lap-time-vs-age data was attempted but showed no usable monotonic signal in this dataset, confounded by fuel burn-off, traffic, and Safety Car periods.)
-
-Encoded with binary indicators $\ell_{l,c,k}$ ("is age $\le t_k$?"), using a per-compound Big-M equal to $L_c^{\max}$:
-$$
-\text{age}_{l,c} \ \le\ t_1 + L_c^{\max}(1-\ell_{l,c,1}), \quad
-\text{age}_{l,c} \ \le\ t_2 + L_c^{\max}(1-\ell_{l,c,2}), \quad
-\text{age}_{l,c} \ \le\ t_3 + L_c^{\max}(1-\ell_{l,c,3})
+\min Z = w_1 \times (\text{time overshoot}) + w_2 \times (\text{pit-stop overshoot}) + w_3 \times (\text{wear-risk overshoot})
 $$
 
-These are naturally nested ($\text{age}\le t_1 \Rightarrow \text{age}\le t_2 \Rightarrow \text{age}\le t_3$, since $t_1<t_2<t_3$), so $\ell_{l,c,1} \le \ell_{l,c,2} \le \ell_{l,c,3}$ holds automatically — no explicit ordering constraint is needed.
+where $w_1$, $w_2$, and $w_3$ are the user's priority weights, required to be non-negative and to add up to exactly 1. Only overshooting a target is penalized — a strategy is never punished for *undershooting* a goal (finishing faster than expected, using fewer stops than the ceiling allows, or ending up with less tyre risk than the floor), since all of those are good outcomes, not bad ones.
 
-**Per-lap risk penalty:**
-$$
-\text{risk}_{l,c} = 3 - \ell_{l,c,1} - \ell_{l,c,2} - \ell_{l,c,3}
-$$
-(all three tier-checks true → tier 0 → penalty 0; none true → tier 3 → penalty 3.) Since this is minimized, the solver is naturally driven to push age down / $\ell$ up wherever possible; a lap where the compound isn't active ($x=0$, age$=0$) trivially satisfies all three tier checks, so it contributes 0 risk with no special-casing needed.
+By default, the weights follow the project's standard convention: 50% weight on time, 25% on pit stops, and 25% on tyre wear — meaning the model is told to care about speed twice as much as it cares about either of the other two factors, by default. These are fully adjustable by the user.
 
-**Total risk score:**
-$$
-R = \sum_{l=1}^{N} \sum_{c \in C} \left(3 - \ell_{l,c,1} - \ell_{l,c,2} - \ell_{l,c,3}\right)
-$$
+### 5.5 An optional hard safety limit, separate from the weighted goals
 
-**Optional hard safety ceiling** (`max_risk_tier_per_compound`, separate from the Goal 3 soft preference):
+In addition to the weighted preference described above, a user can also set an absolute, non-negotiable safety limit for any compound — for example, "never let the Soft compound's tyre age go past the Moderate wear tier, no matter what." This is enforced as a genuine hard rule the solver cannot violate under any circumstance, regardless of how the priority weights are set. It sits underneath Goal 3 as a safety floor, not as a replacement for it — Goal 3 still tries to minimize wear risk as a preference on top of whatever hard limits are in place.
 
-| Chosen ceiling | Enforcement |
+### 5.6 What comes out of Model 2
+
+1. The balanced stint structure and pit-stop laps.
+2. The total race time this balanced strategy achieves.
+3. The time penalty compared to the pure-speed optimum — e.g. "this strategy costs an extra 1.9 seconds, but saves one pit stop." This is the headline trade-off number shown to the user.
+4. How much each of the three goals overshot its target, and the final wear-risk score achieved.
+5. A side-by-side comparison against Model 1's result.
+
+---
+
+## 6. How Tyre Wear Risk Is Measured
+
+This part of the project deserves its own explanation, because it's the most involved piece of modeling.
+
+### 6.1 Why a simple label per compound wasn't good enough
+
+An early, simpler idea was to just assign each tyre compound a fixed riskiness label — "Soft is riskier than Hard," full stop. But that misses the real pattern: *any* compound becomes risky once it's been run far enough past its comfortable working life, and a compound run only a few laps is low-risk no matter which one it is. So instead, risk is tracked **lap by lap, based on how old the current tyre actually is at that moment** — a strategy that pushes a tyre deep into its worn-out zone is penalized more, even if that same strategy happens to be slightly faster overall, which makes risk a genuine trade-off the model has to weigh rather than a fixed label glued to a compound name.
+
+### 6.2 Tracking how old each tyre is, lap by lap
+
+To score risk properly, the model needs to know, for every lap and every compound, exactly how many consecutive laps that compound has been in use *in its current stint* — resetting back to the start whenever a new stint begins. Call this the tyre's **age** on that lap.
+
+Because this age must reset conditionally (only when a new stint actually starts, not on every lap), capturing this correctly inside a strictly linear model takes a careful set of paired rules: one set of rules says that if a new stint begins on this lap, the age must be exactly 1; another set says that if the stint is simply continuing from the lap before, the age must be exactly one more than it was the previous lap; and a final rule forces the age to 0 whenever that compound isn't even the one active on this lap. Together, these guarantee the age value the model computes always matches the real, physical tyre age — fresh at the start of every stint, incrementing by one lap at a time, reset at every pit stop. The age is also required to be a whole number, which — beyond being physically correct, since you can't have "2.5 laps" of tyre age — also makes the solver's search noticeably faster.
+
+### 6.3 Four tiers of wear risk
+
+Rather than using a single continuous risk number, tyre wear is split into four tiers — Low, Moderate, High, and Very High — and each tier is given a risk weight: Low costs 0, Moderate costs 1, High costs 2, and Very High costs 3.
+
+Crucially, the age thresholds that separate these tiers are **scaled to each compound's own real durability**, not to one fixed number of laps for every compound. A compound that typically lasts 40 laps and one that typically lasts 20 laps reach the same *relative* level of wear at very different absolute ages — so the boundaries are set at 40%, 70%, and 90% of that specific compound's own maximum durable stint length (calculated in Section 3.6):
+
+- **Low risk:** tyre age is at most 40% of that compound's typical maximum life.
+- **Moderate risk:** tyre age is between that point and 70% of typical maximum life.
+- **High risk:** tyre age is between that point and 90% of typical maximum life.
+- **Very High risk:** tyre age is beyond 90% of typical maximum life.
+
+(This particular 40/70/90 split is a reasonable, physically motivated choice rather than something fitted directly from the data — the project did try to find these boundaries by fitting them to real lap-time-versus-age patterns, but the real-world data turned out to be too affected by other factors — fuel burning off over a race, traffic, and safety car periods — to produce a reliable, trustworthy fit on its own.)
+
+For every lap and every compound, the risk contributed by that lap is simply 3 minus however many of the three tier thresholds the tyre's current age still satisfies — so a tyre firmly in the Low tier contributes 0, while one that has gone past every threshold into Very High contributes the full 3. A lap where that compound isn't even the one in use naturally contributes zero risk, with no special handling needed. The race's total wear-risk score, $R$, is just the sum of every lap's individual risk contribution, across every lap and every compound.
+
+An optional hard safety ceiling (described in Section 5.5) works by simply forcing the tyre's age to never be allowed to cross into a tier higher than whatever the user chose as the limit for that compound.
+
+### 6.4 Finding the best possible wear-risk score
+
+As explained in Section 5.2, Goal 3's target is not an assumed or arbitrary number — it is the genuine lowest wear-risk score achievable for this specific race, under this specific set of constraints (how many pit stops are required, how many tyre sets are available, any safety ceilings already chosen, and so on). The system finds this number by solving a version of the exact same model once beforehand, with its objective temporarily switched to simply "make the wear-risk score as small as possible," ignoring speed and pit-stop count entirely for that one solve. Whatever risk score that produces becomes the real target used afterward in the full, balanced solve.
+
+This target is deliberately *not* fixed at zero, because a perfectly zero-risk strategy is usually physically impossible: once a stint is required to run for at least the minimum stint length the user chose, the tyre is guaranteed to age past the Low tier at some point during that stint. If the target were fixed at an unreachable zero, every possible strategy would show the same unavoidable overshoot, and the model would have no real incentive to try to reduce risk any further than the unavoidable minimum. Using the genuinely achievable best score instead keeps the comparison meaningful — the very best strategy really can hit zero overshoot on this goal, and anything less careful about tyre wear will show up as a real, meaningful penalty.
+
+### 6.5 Double-checking the risk score after solving
+
+After the full balanced strategy has been solved and turned into a concrete, lap-by-lap sequence of tyre compounds, the system independently recalculates the wear-risk score a second time by walking through that final sequence directly — resetting the tracked age to 1 every time the compound changes, and adding up the tier weight for every lap exactly as described above. This acts as a straightforward, independent check that the risk number reported to the user genuinely matches the final strategy, rather than relying solely on the solver's own internal bookkeeping.
+
+---
+
+## 7. How the Solver's Answer Becomes a Strategy
+
+Once a model (either Model 1 or Model 2) has been fully built, it is handed to a solver — by default, a free, fast solver called HiGHS (with another option, CBC, available as a fallback). The solver is given a time limit (20 seconds) so that a user is never left waiting indefinitely; if the time limit is reached before the solver can mathematically *prove* its answer is the absolute best possible one, but it has still found a genuinely workable strategy, that answer is used and clearly labeled as "best found, not proven optimal" rather than being discarded. Only a case where the solver finds no workable answer at all is treated as a real failure.
+
+### 7.1 Reading off which tyre is on which lap
+
+For every lap, the system looks at which compound's yes/no decision came back closest to "yes" and treats that as the compound used on that lap (with lap-time-based tie-breaking in the rare case of an exact tie or missing value).
+
+### 7.2 Cleaning up the raw answer into valid stints
+
+Because solvers work with small numerical tolerances rather than perfectly exact values, the raw lap-by-lap sequence occasionally needs a small cleanup pass to guarantee every resulting stint genuinely respects the minimum and maximum stint-length rules — any stint found to be slightly too long or too short at this stage is automatically split or trimmed so the final reported strategy is always valid.
+
+### 7.3 Building the final report
+
+From the cleaned-up lap sequence, consecutive laps on the same compound are grouped into stints, each with a start lap, an end lap, how many laps long it is, and how much predicted time it takes. The laps immediately before each stint change become the reported pit-stop laps. The total race time is recalculated directly from this final sequence (sum of every lap's predicted time, plus the pit-stop cost multiplied by however many stops there are), and for Model 2, the final weighted objective value is also reported.
+
+---
+
+## 8. Checking Feasibility Before Solving
+
+Rather than simply handing a possibly-impossible combination of user settings straight to the solver and getting back a vague "no solution found," the system runs through a short series of plain, explainable checks *before* solving Model 2, so that if something truly cannot work, the user is told exactly why in terms they can act on:
+
+1. **Is there enough tyre allowance to even make the required number of stops?** The total number of tyre sets the user allowed, added up across every compound, must be at least one more than the minimum number of pit stops required (since every stint uses up one set). If not, the system explains exactly how many sets are available versus how many stints are actually needed.
+
+2. **Does a safety ceiling make a compound impossible to use at all?** If the user has set a wear-risk safety limit for a compound that is stricter than the minimum stint length they've also required, no stint on that compound could ever be run without breaking one rule or the other — this contradiction is caught and explained by name, rather than silently producing a strategy that quietly avoids that compound without saying why.
+
+3. **Can the full race distance even be covered, combining every limit at once?** The system calculates, for every compound, the longest any single stint on it could possibly run (taking the stricter of its physical durability limit and any safety ceiling the user set), multiplies that by however many sets of it are allowed, and adds that up across every compound. If this total is less than the number of laps in the race, there is genuinely no way to finish the race under the combination of limits the user has chosen — and the system reports the exact shortfall, compound by compound, rather than leaving the user guessing which setting to loosen.
+
+---
+
+## 9. How Model 1 and Model 2 Work Together
+
+Every single time Model 2 is run, the system first silently re-solves Model 1 from scratch, using the exact same race, driver, and user settings — this is how it obtains the genuine fastest-possible-time target described in Section 5.2. That number is never cached, assumed, or pulled from history; it is always a fresh, true optimum for the specific situation currently being analyzed.
+
+The overall sequence when a user asks for a balanced (Model 2) strategy is:
+
+1. Solve Model 1 first, to get the true fastest possible race time for these exact settings.
+2. Work out the wear-risk tiers for each compound, based on their durability.
+3. Run the feasibility checks described above, stopping early with a clear explanation if something can't work.
+4. Solve a throwaway version of Model 2 whose only goal is minimizing wear risk, to find the true best-possible risk score.
+5. Solve the real, full Model 2 — balancing speed, pit-stop count, and wear risk against each other using the user's chosen weights — using the two solved targets from steps 1 and 4, plus the user's own pit-stop count target.
+
+So the only target in Model 2 that is a direct, unmodified user input is the pit-stop count target; the race-time target and the wear-risk target are both genuinely solved for, each time, specific to the exact race and settings being analyzed.
+
+---
+
+## 10. Checking the Models Against Real Races
+
+To make sure these models produce sensible, trustworthy results — not just mathematically valid but nonsensical ones — the project includes two checking scripts that run both models against real historical races and compare the results to what actually happened.
+
+### 10.1 A broad sanity check across every race
+
+The first script runs both Model 1 and Model 2 across every race in the dataset (or a smaller quick sample), and for each one checks simple, common-sense things: did the solver report success, do the resulting stint lengths add up to exactly the right number of laps for that race, is every stint at least one lap long, and do both models agree on how many laps the race actually has. The results of every single race checked are written out to a spreadsheet file so they can be reviewed afterward, and the check can safely be paused and resumed partway through a long run.
+
+### 10.2 Comparing predictions to what actually happened on track
+
+The second script goes further: for every race that passed the basic sanity check, it finds whoever was the fastest real driver to actually finish that race (excluding anyone who retired early), while being careful to exclude any lap whose recorded time was wildly inflated by a red flag or safety car stoppage rather than reflecting genuine pace. It then re-solves both models for that same race and compares the predicted total race time, and the predicted sequence of tyre compounds and pit stops, against what that real, fastest finishing driver actually did. This produces a report showing, on average, how closely the models' predictions track real race outcomes, and how often the predicted strategy would have been faster than what actually happened on the day — a practical, down-to-earth check of whether the fitted speed and tyre-wear numbers behind the models are realistic, rather than wildly optimistic or pessimistic.
+
+### 10.3 A more detailed, formally planned validation step
+
+The project's design also describes a more detailed, formal comparison — one that would calculate a precise percentage error between predicted and actual race time, and check exactly how well a predicted pit-stop count and stint structure line up with what a real driver did. This more detailed version has not yet been built out in code; the two checking scripts described just above are the methodology's actual, currently working way of validating the models against reality.
+
+---
+
+## 11. A Worked Example With Real Numbers
+
+To make all of this concrete, here is one real result the system produced for the 2018 Abu Dhabi Grand Prix, a 55-lap race:
+
+| | Model 1 (fastest possible) | Model 2 (balanced, limited to 1 pit stop) |
+|---|---|---|
+| Number of stints | 2 | 2 |
+| Number of pit stops | 1 | 1 |
+| Pit-stop cost at this circuit | 22.96 seconds | 22.96 seconds |
+| Total predicted race time | 5923.39 seconds | 5906.60 seconds |
+
+Interestingly, in this particular example, Model 2 actually came back slightly *faster* than Model 1. That can genuinely happen: Model 1, left completely free, is only required to make *at least* one pit stop and will happily make more stops than that if doing so turns out to be faster overall — whereas in this example, Model 2 was additionally given a hard ceiling of exactly one pit stop. So the two models were answering two subtly different questions here (one with a stop-count ceiling, one without). When both models are given exactly the same minimum and maximum pit-stop limits, Model 2's race time is always at least as slow as Model 1's — it can never beat the genuinely fastest possible time, by definition — and the typical, expected pattern is a small time penalty, something on the order of a couple of extra seconds, in exchange for one fewer pit stop or meaningfully safer tyre usage. That small time penalty, shown clearly to the user, is the headline number the whole balanced-strategy feature is built to produce.
+
+---
+
+## 12. Full List of Symbols Used
+
+| Symbol | What it means |
 |---|---|
-| Max tier 0 (Low) | $\ell_{l,c,1} = 1 \ \forall l$ — age may never exceed $t_1$ |
-| Max tier 1 (Moderate) | $\ell_{l,c,2} = 1 \ \forall l$ — age may never exceed $t_2$ |
-| Max tier 2 (High) | $\ell_{l,c,3} = 1 \ \forall l$ — age may never exceed $t_3$ |
-| Max tier 3 (Very high) | No restriction (already the ceiling) |
-
-### 6.4 Computing $R^*$ (Goal 3's target)
-
-$R^*$ is **not** fixed at 0 — a tyre cannot physically stay in the lowest risk tier for an entire stint once it must run at least `min_stint_length` laps, so an unreachable $R^*=0$ would leave every strategy with the same unavoidable $d_3^+$ floor and give the optimizer no real pressure to minimize risk further.
-
-Instead, $R^*$ is found by actually **solving the model once with its objective swapped** to `minimize R` alone (`Scope2GoalModel(..., minimize_risk_only=True)`), keeping every other constraint identical (stint lengths, durability, tyre-set limits, min/max pit stops, and any `max_risk_tier_per_compound` ceilings already in force). This mirrors exactly how $T^*$ is already Model 1's own solved optimum rather than an assumed value — both "ideal" targets in Model 2 are genuinely *solved for*, not guessed.
-
-### 6.5 Recomputing risk after solving (verification)
-
-After the real balanced solve finishes and a concrete lap-by-lap compound sequence is extracted, `Scope2GoalSolver._compute_risk_score` independently recomputes $R$ by walking the final sequence lap-by-lap, resetting age to 1 at each compound change and summing tier weights — a direct, non-MILP cross-check of the value the age/tier constraints produced.
-
----
-
-## 7. Solving and Extracting a Strategy
-
-**Solver:** [PuLP](https://coin-or.github.io/pulp/), defaulting to the **HiGHS** backend (free, and faster in practice than CBC on this project's models — especially the risk-tier formulation, which adds a lot of binary variables), with `PULP_CBC_CMD` as the alternative. A time limit (20s by default) is applied: a very good but not provably optimal solution returned within a bounded time is more useful to a user than an indefinite wait for a proof of optimality. A solve that hits the time limit but still has a feasible integer solution reports status `"Not Solved"` and is accepted (reported to the user as *"Best found (time limit reached)"*); only a genuinely infeasible model is rejected.
-
-### 7.1 Extracting the lap-by-lap compound sequence
-
-For each lap, the compound whose $x_{l,c}$ value is highest is selected (`_extract_lap_compounds`); ties/missing values fall back to whichever compound has the lowest predicted lap time at that lap.
-
-### 7.2 Normalizing into valid stints
-
-`_normalize_to_valid_stints` is a guardrail pass: it re-chunks any raw block of same-compound laps that violates the durability ceiling or minimum-stint-length floor (which can happen at the solver's numeric tolerance boundaries), splitting or capping blocks so every reported stint is truly within $[\text{min\_stint\_length}, L_c^{\max}]$.
-
-### 7.3 Building the stint list and final metrics
-
-From the normalized sequence, consecutive same-compound runs become `StintPlan` entries (`stint_number`, `compound`, `start_lap`, `end_lap`, `stint_length`, `predicted_stint_time`). Pit-stop laps are the laps immediately preceding each stint boundary. Final reported totals:
-$$
-T_{\text{total}} = \sum_{l,c} T_{l,c}\, x_{l,c}^{*} + P \cdot |\{\text{pit laps}\}|
-$$
-and, for Model 2, the objective value
-$$
-Z^{*} = w_1 d_1^{+*} + w_2 d_2^{+*} + w_3 d_3^{+*}
-$$
+| $N$ | Total number of laps in the race |
+| $l$ | A specific lap number, from 1 up to $N$ |
+| $c$ | A specific tyre compound |
+| $x_{l,c}$ | 1 if compound $c$ is the active tyre on lap $l$, otherwise 0 |
+| $p_l$ | 1 if a pit stop happens right after lap $l$, otherwise 0 |
+| $s_{l,c}$ | 1 if a brand-new stint on compound $c$ begins at lap $l$, otherwise 0 |
+| $T_{l,c}$ | The predicted lap time for compound $c$ on lap $l$ |
+| $P$ | The time cost of one pit stop at this circuit, in seconds |
+| $L_c^{\max}$ | The longest a stint on compound $c$ can safely run, in laps |
+| $T^{*}$ | The true fastest possible total race time (Model 1's solved result) |
+| $R$ | The total tyre wear-risk score of a given strategy |
+| $R^{*}$ | The true lowest possible wear-risk score achievable for this race |
+| $w_1, w_2, w_3$ | The user's priority weights for speed, pit-stop count, and tyre wear respectively, adding up to 1 |
+| $Z$ | Model 2's overall objective value — the weighted total of how much each goal was overshot |
 
 ---
 
-## 8. Feasibility Checks Before Solving
+### Where this logic lives in the project's code, for reference
 
-Rather than letting an infeasible model silently fail or time out inside the solver, `BackendOptimizationRunner.run_scope2` runs a chain of **explicit, human-readable feasibility checks** first:
+For anyone who wants to read the actual implementation after understanding the method described above:
 
-1. **Tyre-set sufficiency:** total allocated sets across all compounds must be $\ge \text{min\_pit\_stops}+1$ (the minimum number of stints any valid strategy needs). If not, rejected with the exact shortfall shown.
-2. **Risk-ceiling vs. minimum stint length:** if a requested `max_risk_tier_per_compound` ceiling's age threshold is smaller than `min_stint_length`, no valid stint on that compound could ever stay within the ceiling — rejected with the specific compound and numbers named.
-3. **Total coverage under combined constraints:** the maximum laps any compound can contribute is $\min(\text{tier cap if any}, L_c^{\max}) \times \text{max\_sets}_c$; summed across all compounds, this must be $\ge N$. If the risk ceilings and tyre-set limits together can't physically cover the race distance, this is caught and reported with a full per-compound breakdown — *before* ever invoking the solver.
-
-This design choice (checked explicitly in `backend/app/services/runner.py` rather than relying on PuLP's own infeasibility message) is what turns an opaque "Infeasible" solver status into an actionable message telling the user exactly which input to relax.
-
----
-
-## 9. Integration: Linking Model 1 and Model 2
-
-```
-run_scope2(request)
-  1. Calls build_strategy_preview(...) → solves Model 1 → scope1_target = T*
-  2. Derives risk_tiers from max_stint_durability (§6.3)
-  3. Runs the feasibility chain (§8)
-  4. Solves a throwaway Scope2GoalModel(minimize_risk_only=True) → target_risk = R* (§6.4)
-  5. Builds the real Scope2Parameters with targets (T*, P*, R*) and solves the full
-     weighted goal-programming model → the balanced strategy
-```
-
-So every run of Model 2 **always re-solves Model 1 first** for that exact race/driver/constraint combination — $T^*$ is never a cached or historical number, it's the true current optimum under the current inputs. Likewise $R^*$ is freshly solved for, not assumed. Only $P^*$ (via `max_pit_stops`) is a direct user input rather than something solved for.
-
-The formal `src/f1_optimizer/integration/` package (`pipeline.py`, `comparator.py`) sketches the same orchestration and a `StrategyComparator` for natural-language trade-off summaries, but those two files are intentionally left as stubs (`raise NotImplementedError`) — the live application performs this orchestration directly inside `BackendOptimizationRunner`, which is the implementation this document describes.
-
----
-
-## 10. Validation Against Real Race Results
-
-### 10.1 Bulk sanity validation — `scripts/validate_models.py`
-
-Runs both Model 1 and Model 2 across every available (year, race) combination (or a `--quick` sample), and for each checks:
-- solver status is `Optimal`,
-- the stint lengths sum exactly to the race's total lap count,
-- every stint has at least 1 lap,
-- Model 1 and Model 2 agree on total race distance.
-
-Results are streamed to `scripts/validation_report.csv` (one row per model per race) so a long run can be safely interrupted and resumed (`--resume`).
-
-### 10.2 Real-world comparison — `scripts/compare_to_real.py`
-
-For every race that passed validation, this script:
-1. Finds the **fastest real finisher** (excluding anyone who didn't complete the race distance, within 1 lap), after filtering out laps inflated by red flags/Safety Cars (any lap $>3\times$ that race's median lap time is dropped — a true stoppage, not normal variance).
-2. Re-solves both models for that race.
-3. Computes
-$$
-\Delta_{\text{real}} = T_{\text{predicted}} - T_{\text{real, fastest finisher}}
-$$
-and records whether the predicted strategy's pit-stop count and compound sequence resemble the real one.
-
-This produces `scripts/real_vs_predicted.csv`, from which average deltas and "beat the real fastest finisher" rates are printed per model — the practical check of whether the fitted degradation curves and pit-loss estimates produce *plausible* (not wildly optimistic or pessimistic) race times compared to what actually happened on track.
-
-### 10.3 Formal validation module (design-level)
-
-`src/f1_optimizer/common/validation/result_validator.py` defines the intended formal metric set for comparing a single predicted strategy against Kaggle ground truth:
-$$
-\text{Error}_{\text{time}} = \frac{|T_{\text{predicted}} - T_{\text{actual}}|}{T_{\text{actual}}} \times 100\%
-$$
-plus pit-stop count concordance and stint-transition-lap accuracy. This module is currently a stub (`NotImplementedError`) — the two scripts above are the methodology's actual, working validation layer.
-
----
-
-## 11. Worked Numerical Example
-
-Using a real row pair from `scripts/validation_report.csv` — **2018 Abu Dhabi Grand Prix**, $N=55$ laps:
-
-| | Model 1 (MILP) | Model 2 (Goal Programming) |
-|---|---|---|
-| Pit-stop ceiling given | — | `max_pit_stops = 1` |
-| Stints found | 2 | 2 |
-| Pit stops | 1 | 1 |
-| $P$ (pit loss, this circuit) | 22.96 s | 22.96 s |
-| Total predicted race time | 5923.39 s | 5906.60 s |
-
-Here Model 2 actually finds a slightly **faster** total than Model 1 for the same pit-stop count — this is possible because Model 1's objective purely minimizes time with only a *floor* on pit stops (so it may use more stops than strictly needed if that's faster), while Model 2 is given a tighter pit-stop ceiling as a hard input; the two models are answering related but not identical questions for this particular parameter set. The general expectation $T_{\text{balanced}} \ge T^*$ (§5.3) holds when both models are run with the **same** `min_pit_stops`/`max_pit_stops` window — see `tests/scope2/test_scope2.py` for the boundedness test that enforces this under matched constraints.
-
-For a race requiring a genuine trade (e.g. forcing fewer stops than Model 1's free optimum would choose), the typical pattern is a small positive time delta, e.g. $\Delta T \approx +1.9\text{s}$ to save one stop — the headline trade-off number surfaced on the comparison screen (§5.6, point 3).
-
----
-
-## 12. Glossary of Symbols
-
-| Symbol | Meaning |
-|---|---|
-| $N$ | Total race laps |
-| $C$ | Set of tyre compounds present in this race's data |
-| $l$ | Lap index, $1,\dots,N$ |
-| $c$ | Compound index |
-| $x_{l,c}$ | 1 if compound $c$ active on lap $l$ |
-| $p_l$ | 1 if a pit stop occurs after lap $l$ |
-| $s_{l,c}$ | 1 if a new stint on $c$ starts at lap $l$ |
-| $\text{age}_{l,c}$ | Consecutive laps $c$ has run, counting lap $l$ |
-| $\ell_{l,c,k}$ | 1 if $\text{age}_{l,c} \le$ tier-$k$ threshold |
-| $T_{l,c}$ | Predicted lap time for compound $c$ on lap $l$ |
-| $\text{Base}_c$ | Fitted baseline pace (intercept) for compound $c$ |
-| $\alpha_c$ | Fitted degradation rate (slope, s/lap) for compound $c$, floored at 0 |
-| $P$ | Pit-stop time loss (seconds), race/circuit-specific |
-| $L_c^{\max}$ | Max durable stint length for compound $c$ |
-| $T^{*}$ | Model 1's solved fastest race time (Goal 1's target) |
-| $P^{*}$ | User's `max_pit_stops` (Goal 2's target) |
-| $R$ | Strategy's total degradation-risk score |
-| $R^{*}$ | True minimum achievable risk score (Goal 3's target, solved for) |
-| $d_k^+, d_k^-$ | Over-/under-achievement deviation for goal $k \in \{1,2,3\}$ |
-| $w_1, w_2, w_3$ | Priority weights, $\sum w_k = 1$ |
-| $Z$ | Model 2's weighted-deviation objective value |
-
----
-
-### Where each piece lives in the code
-
-| Concept | File |
-|---|---|
-| Dataset access | `src/f1_optimizer/common/data/dataset_loader.py` |
-| Lap-time parsing | `src/f1_optimizer/common/utils/time_utils.py` |
-| Degradation curve fitting (general) | `src/f1_optimizer/common/tyre/degradation_model.py` |
-| Stint-life statistics | `src/f1_optimizer/common/statistics/tyre_statistics.py` |
-| **All real parameter derivation, feasibility checks, T\*/R\* discovery** | `backend/app/services/runner.py` (`BackendOptimizationRunner`) |
-| Model 1 formulation | `src/f1_optimizer/scope1/model/milp_model.py` |
-| Model 1 parameters schema | `src/f1_optimizer/scope1/parameters/scope1_parameters.py` |
-| Model 1 solving & extraction | `src/f1_optimizer/scope1/solver/milp_solver.py` |
-| Model 2 formulation | `src/f1_optimizer/scope2/model/goal_model.py` |
-| Model 2 parameters schema | `src/f1_optimizer/scope2/parameters/scope2_parameters.py` |
-| Model 2 goals/weights | `src/f1_optimizer/scope2/goals/goal_definitions.py`, `weights.py` |
-| Model 2 solving & extraction | `src/f1_optimizer/scope2/solver/goal_solver.py` |
-| Bulk sanity validation | `scripts/validate_models.py` |
-| Real-world comparison | `scripts/compare_to_real.py` |
-| FastAPI endpoints | `backend/app/api/routes.py` |
+- The combined dataset and the shared loading logic live under the `src/f1_optimizer/common/` folder.
+- The bulk of the real parameter calculations described in Section 3 — baseline pace, degradation rate, pit-loss time, durability, and all the feasibility checks — are implemented in `backend/app/services/runner.py`.
+- Model 1's mathematical formulation lives in `src/f1_optimizer/scope1/model/milp_model.py`, with its solving logic in `src/f1_optimizer/scope1/solver/milp_solver.py`.
+- Model 2's mathematical formulation lives in `src/f1_optimizer/scope2/model/goal_model.py`, with its solving logic in `src/f1_optimizer/scope2/solver/goal_solver.py`.
+- The two checking scripts described in Section 10 are `scripts/validate_models.py` and `scripts/compare_to_real.py`.
