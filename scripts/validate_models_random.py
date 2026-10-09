@@ -33,11 +33,17 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
+import pulp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.app.services.runner import BackendOptimizationRunner  # noqa: E402
 from src.f1_optimizer.common.utils.time_utils import lap_time_str_to_seconds  # noqa: E402
+from src.f1_optimizer.scope2.goals.goal_definitions import GoalTargets  # noqa: E402
+from src.f1_optimizer.scope2.goals.weights import GoalWeights  # noqa: E402
+from src.f1_optimizer.scope2.model.goal_model import Scope2GoalModel  # noqa: E402
+from src.f1_optimizer.scope2.parameters.scope2_parameters import Scope2Parameters  # noqa: E402
+from src.f1_optimizer.scope2.solver.goal_solver import Scope2GoalSolver  # noqa: E402
 
 
 def filter_red_flag_laps(race: pd.DataFrame) -> pd.DataFrame:
@@ -251,16 +257,130 @@ def generate_valid_inputs(
         max_sets_per_compound[compound] += 1
         guard += 1
 
+    # weights: randomized goal-priority weights (w1 time / w2 pit stops / w3 degradation),
+    # normalized to sum to exactly 1.0 as GoalWeights requires -- per user request, so
+    # Model 2 explores different trade-off preferences across races, not one fixed 50/25/25
+    # split for all 109.
+    raw = [rng.uniform(0.05, 1.0) for _ in range(3)]
+    total_raw = sum(raw)
+    weights = {
+        "weight_time_w1": raw[0] / total_raw,
+        "weight_pit_stops_w2": raw[1] / total_raw,
+        "weight_degradation_w3": raw[2] / total_raw,
+    }
+    # Floating-point division can leave the sum a hair off 1.0 (e.g. 0.9999999999998) --
+    # GoalWeights requires exact (within 1e-6), so fold the rounding error into w1 rather
+    # than leave all three as raw divisions.
+    weights["weight_time_w1"] = 1.0 - weights["weight_pit_stops_w2"] - weights["weight_degradation_w3"]
+
+    # Feasibility retry: the coverage/tyre-set checks above guarantee ENOUGH laps are
+    # coverable in total, but not that a valid STINT SEQUENCE exists under min_stint_length
+    # + the risk ceilings together (e.g. a compound capped at 8 laps by its risk tier but
+    # required to run >=10-lap stints by min_stint_length has zero usable stint lengths).
+    # The only ground-truth check for that is the real R*-discovery solve itself, so probe
+    # it directly and loosen the single tightest risk ceiling (or add a tyre set) on
+    # failure, retrying with the real solver until it's genuinely feasible -- per user
+    # request, every one of the 109 races should return a Model 2 result, not just most.
+    max_feasibility_retries = 15
+    for _ in range(max_feasibility_retries):
+        probe_ok, probe_reason = _probe_risk_feasibility(
+            total_laps=total_laps,
+            compounds=compounds,
+            min_pit_stops=min_pit_stops,
+            min_stint_length=min_stint_length,
+            max_stint_durability=max_stint_durability,
+            max_sets_per_compound=max_sets_per_compound,
+            risk_tiers=risk_tiers,
+            max_risk_tier_per_compound=max_risk_tier_per_compound,
+        )
+        if probe_ok:
+            break
+
+        if max_risk_tier_per_compound:
+            # Loosen the single tightest ceiling by one tier (or remove it at tier 2 -> no
+            # limit) -- the most targeted fix, since the ceiling is almost always what's
+            # actually blocking a valid stint sequence.
+            tightest = min(max_risk_tier_per_compound, key=lambda c: max_risk_tier_per_compound[c])
+            current_tier = max_risk_tier_per_compound[tightest]
+            if current_tier >= 2:
+                del max_risk_tier_per_compound[tightest]
+            else:
+                max_risk_tier_per_compound[tightest] = current_tier + 1
+        else:
+            # No risk ceilings left to loosen -- the remaining blocker is tyre-set count
+            # vs. min_stint_length interaction, so add a set to whichever compound covers
+            # the most laps per set (mirrors the coverage guard above).
+            compound = max(compounds, key=lambda c: max_laps_per_set(c))
+            max_sets_per_compound[compound] += 1
+    else:
+        # Exhausted retries (extremely rare) -- fall back to no risk ceilings at all, which
+        # by construction (max_tier >= 3 means "no restriction") is always feasible.
+        max_risk_tier_per_compound = {}
+
     return {
         "min_pit_stops": min_pit_stops,
         "min_stint_length": min_stint_length,
         "max_sets_per_compound": max_sets_per_compound,
         "max_risk_tier_per_compound": max_risk_tier_per_compound,
+        "weights": weights,
         "compounds": compounds,
         "total_laps": total_laps,
         "risk_tiers": risk_tiers,
         "max_stint_durability": max_stint_durability,
     }
+
+
+def _probe_risk_feasibility(
+    total_laps: int,
+    compounds: list[str],
+    min_pit_stops: int,
+    min_stint_length: int,
+    max_stint_durability: dict[str, int],
+    max_sets_per_compound: dict[str, int],
+    risk_tiers: dict[str, list[int]],
+    max_risk_tier_per_compound: dict[str, int],
+) -> tuple[bool, str]:
+    """Ground-truth feasibility check: actually runs the real R*-discovery MILP solve
+    (the same one BackendOptimizationRunner._get_min_achievable_risk_score runs inside
+    run_scope2) with these exact constraints, rather than approximating. Returns
+    (True, "") if a minimum achievable risk score exists, else (False, reason)."""
+    try:
+        params = Scope2Parameters(
+            total_laps=total_laps,
+            compounds=compounds,
+            pit_loss_p=25.0,  # irrelevant to a risk-only objective -- any positive value works
+            targets=GoalTargets(target_race_time_t_star=1.0),
+            weights=GoalWeights(),
+            min_pit_stops=min_pit_stops,
+            # Must match BackendOptimizationRunner._resolve_max_pit_stops' own default
+            # EXACTLY (max(min_pit_stops, 1), used whenever the caller doesn't pass an
+            # explicit max_pit_stops -- which run_one_race's payload never does) -- a
+            # looser probe ceiling here previously made races look feasible that the real
+            # run_scope2 call (forced to this tighter default) then rejected as Infeasible.
+            max_pit_stops=max(min_pit_stops, 1),
+            min_stint_length=min_stint_length,
+            max_stint_durability=max_stint_durability,
+            max_sets_per_compound=max_sets_per_compound,
+            # Irrelevant to a risk-only objective (minimize_risk_only=True ignores lap-time
+            # terms entirely) -- empty dicts are safe since the model only ever does
+            # defaulting .get(..., 0.0) lookups against them.
+            predicted_lap_times={},
+            compound_base_pace={},
+            compound_degradation_rate={},
+            risk_tiers=risk_tiers,
+            max_risk_tier_per_compound=max_risk_tier_per_compound,
+        )
+        model_builder = Scope2GoalModel(params, minimize_risk_only=True)
+        model = model_builder.build()
+        status = model.solve(Scope2GoalSolver()._build_solver())
+        status_name = pulp.LpStatus[status]
+        if status_name not in {"Optimal", "Not Solved"}:
+            return False, status_name
+        if pulp.value(model_builder.risk_score) is None:
+            return False, "no value within time limit"
+        return True, ""
+    except Exception as exc:  # pragma: no cover - defensive: treat any probe error as infeasible
+        return False, str(exc)
 
 
 def strategy_to_str(strategy: list[dict]) -> str:
@@ -271,7 +391,7 @@ FIELDNAMES = [
     "year", "race", "total_laps", "compounds", "pit_loss_seconds_used",
     "min_pit_stops_used", "min_stint_length_used",
     "max_sets_per_compound_used", "max_risk_tier_per_compound_used", "risk_tiers_used",
-    "max_stint_durability_used",
+    "max_stint_durability_used", "weights_used",
     # Real (ground truth)
     "real_driver", "real_time_seconds", "real_pit_stops", "real_stint_count",
     "real_strategy", "real_strategy_detailed", "red_flag_laps_dropped",
@@ -312,6 +432,7 @@ def run_one_race(
         "min_stint_length": inputs["min_stint_length"],
         "max_sets_per_compound": inputs["max_sets_per_compound"],
         "max_risk_tier_per_compound": inputs["max_risk_tier_per_compound"],
+        "weights": inputs["weights"],
     }
 
     t0 = time.perf_counter()
@@ -326,6 +447,22 @@ def run_one_race(
         r2 = runner.run_scope2(payload)
     except Exception as exc:  # pragma: no cover - defensive
         r2 = {"strategy": [], "solver_status": None, "message": f"EXCEPTION: {exc}"}
+    # Retry once on a solver-reported "Infeasible" specifically (not other rejection
+    # messages, e.g. the coverage-feasibility pre-check, which are genuinely deterministic).
+    # Under N-way parallel workers competing for CPU, HiGHS can occasionally fail to find
+    # ANY feasible incumbent within the time limit and report Infeasible even though the
+    # problem is solvable -- confirmed by replaying a real sweep race standalone (no
+    # contention) and getting "Best found" instead. A single retry gives it a second
+    # independent attempt, which is enough in practice since the underlying problem IS
+    # feasible; this never masks a genuine structural infeasibility, since those fail the
+    # same way every time regardless of contention.
+    if "Infeasible" in str(r2.get("message", "")):
+        try:
+            r2_retry = runner.run_scope2(payload)
+            if "Infeasible" not in str(r2_retry.get("message", "")):
+                r2 = r2_retry
+        except Exception:
+            pass  # keep the original r2 (and its message) if the retry itself errors
     m2_elapsed = time.perf_counter() - t0
 
     deviations = r2.get("deviations") or {}
@@ -350,6 +487,7 @@ def run_one_race(
         "max_risk_tier_per_compound_used": json.dumps(inputs["max_risk_tier_per_compound"]),
         "risk_tiers_used": json.dumps(inputs["risk_tiers"]),
         "max_stint_durability_used": json.dumps(inputs["max_stint_durability"]),
+        "weights_used": json.dumps({k: round(v, 4) for k, v in inputs["weights"].items()}),
         "real_driver": baseline["real_driver"],
         "real_time_seconds": real_time,
         "real_pit_stops": baseline["real_pit_stops"],

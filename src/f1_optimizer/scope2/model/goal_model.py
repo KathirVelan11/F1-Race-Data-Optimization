@@ -99,14 +99,6 @@ class Scope2GoalModel:
         d3_minus = pulp.LpVariable("d3_minus", lowBound=0)
 
         total_pit_stops = pulp.lpSum(p.values())
-        total_time = (
-            pulp.lpSum(
-                self.params.predicted_lap_times.get(lap, {}).get(compound, 0.0) * x[(lap, compound)]
-                for lap in laps
-                for compound in compounds
-            )
-            + self.params.pit_loss_p * total_pit_stops
-        )
         for lap in laps:
             model += pulp.lpSum(x[(lap, compound)] for compound in compounds) == 1
 
@@ -184,6 +176,22 @@ class Scope2GoalModel:
                     model += age[(lap, compound)] >= prev_age + 1 - big_m_c * (1 - x[(lap, compound)]) - big_m_c * start[(lap, compound)]
                     model += age[(lap, compound)] <= 1 + big_m_c * (1 - start[(lap, compound)])
                     model += age[(lap, compound)] >= 1 - big_m_c * (1 - start[(lap, compound)])
+
+        # Race time, using TRUE tyre age (not race lap number): base_pace[c] * x[l,c] +
+        # degradation_rate[c] * age[l,c]. age[l,c] is already forced to 0 whenever
+        # x[l,c]=0 (see the age big-M constraints above), so this is a correct linear
+        # cost with no bilinear (age * x) term needed -- a fresh tyre fitted mid-race
+        # costs base_pace + degradation_rate*1 regardless of what race lap it started on,
+        # instead of being penalized as if it already had that many laps of wear.
+        total_time = (
+            pulp.lpSum(
+                self.params.compound_base_pace.get(compound, 0.0) * x[(lap, compound)]
+                + self.params.compound_degradation_rate.get(compound, 0.0) * age[(lap, compound)]
+                for lap in laps
+                for compound in compounds
+            )
+            + self.params.pit_loss_p * total_pit_stops
+        )
 
         # Risk tiers: for each (lap, compound), derive a cumulative risk-tier score from
         # tyre age, scaled to that compound's own durability (Scope2Parameters.risk_tiers).

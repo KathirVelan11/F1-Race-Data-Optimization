@@ -37,7 +37,19 @@ class Scope2Parameters(BaseModel):
         ..., description="Max number of separate stints allowed on each compound (tyre-set allocation limit)"
     )
     predicted_lap_times: Dict[int, Dict[str, float]] = Field(
-        ..., description="T_{l,c} predicted lap times per lap and compound"
+        ...,
+        description=(
+            "T_{l,c} predicted lap times per lap and compound, AT TYRE AGE = l (i.e. as if "
+            "that compound had been fitted at the start of the race). Not used by the "
+            "objective itself -- see compound_base_pace/compound_degradation_rate, which "
+            "combine with the model's own true per-stint age[l,c] variable instead."
+        ),
+    )
+    compound_base_pace: Dict[str, float] = Field(
+        ..., description="alpha_c: fitted base lap time (tyre age 0) per compound, from real data"
+    )
+    compound_degradation_rate: Dict[str, float] = Field(
+        ..., description="beta_c: fitted degradation rate (seconds/lap of tyre age) per compound, from real data"
     )
     risk_tiers: Dict[str, List[int]] = Field(
         ...,

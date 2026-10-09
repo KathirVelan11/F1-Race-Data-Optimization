@@ -45,6 +45,8 @@ class Scope1Service:
             "max_stint_durability": race_context.compound_durability_limits,
             "max_sets_per_compound": max_sets_per_compound,
             "predicted_lap_times": predicted_lap_times,
+            "compound_base_pace": dict(race_context.compound_base_times),
+            "compound_degradation_rate": dict(race_context.compound_degradation_slopes),
         }
 
         scope1_parameters = Scope1Parameters(**parameters)

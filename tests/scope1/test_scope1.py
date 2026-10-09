@@ -21,6 +21,8 @@ def test_scope1_model_feasibility():
             lap: {"SOFT": 86.0 + 0.05 * lap, "MEDIUM": 88.0 + 0.04 * lap, "HARD": 90.0 + 0.03 * lap}
             for lap in range(1, 59)
         },
+        compound_base_pace={"SOFT": 86.0, "MEDIUM": 88.0, "HARD": 90.0},
+        compound_degradation_rate={"SOFT": 0.05, "MEDIUM": 0.04, "HARD": 0.03},
     )
 
     result = Scope1MilpSolver().solve(parameters)
@@ -44,6 +46,8 @@ def test_scope1_min_pit_stops_constraint():
             lap: {"SOFT": 86.5 + 0.04 * lap, "MEDIUM": 88.0 + 0.03 * lap, "HARD": 90.5 + 0.025 * lap}
             for lap in range(1, 59)
         },
+        compound_base_pace={"SOFT": 86.5, "MEDIUM": 88.0, "HARD": 90.5},
+        compound_degradation_rate={"SOFT": 0.04, "MEDIUM": 0.03, "HARD": 0.025},
     )
 
     result = Scope1MilpSolver().solve(parameters)
@@ -64,6 +68,8 @@ def test_scope1_min_stint_length_constraint():
             lap: {"SOFT": 86.0 + 0.05 * lap, "MEDIUM": 88.0 + 0.04 * lap, "HARD": 90.0 + 0.03 * lap}
             for lap in range(1, 59)
         },
+        compound_base_pace={"SOFT": 86.0, "MEDIUM": 88.0, "HARD": 90.0},
+        compound_degradation_rate={"SOFT": 0.05, "MEDIUM": 0.04, "HARD": 0.03},
     )
 
     result = Scope1MilpSolver().solve(parameters)
@@ -84,6 +90,8 @@ def test_scope1_max_stint_durability_constraint():
             lap: {"SOFT": 85.0 + 0.02 * lap, "MEDIUM": 87.0 + 0.02 * lap, "HARD": 89.0 + 0.02 * lap}
             for lap in range(1, 59)
         },
+        compound_base_pace={"SOFT": 85.0, "MEDIUM": 87.0, "HARD": 89.0},
+        compound_degradation_rate={"SOFT": 0.02, "MEDIUM": 0.02, "HARD": 0.02},
     )
 
     result = Scope1MilpSolver().solve(parameters)
@@ -104,6 +112,8 @@ def test_scope1_max_sets_per_compound_constraint():
             lap: {"SOFT": 86.0 + 0.05 * lap, "MEDIUM": 88.0 + 0.04 * lap, "HARD": 90.0 + 0.03 * lap}
             for lap in range(1, 59)
         },
+        compound_base_pace={"SOFT": 86.0, "MEDIUM": 88.0, "HARD": 90.0},
+        compound_degradation_rate={"SOFT": 0.05, "MEDIUM": 0.04, "HARD": 0.03},
     )
 
     result = Scope1MilpSolver().solve(parameters)

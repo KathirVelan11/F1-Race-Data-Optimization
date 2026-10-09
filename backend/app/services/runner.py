@@ -302,13 +302,15 @@ class BackendOptimizationRunner:
     def _build_predicted_lap_times(
         self, df: "pd.DataFrame", compounds: List[str], total_laps: int
     ) -> Dict[int, Dict[str, float]]:
-        """Predicted lap time per (lap, compound) from the fitted degradation model only:
-        base_pace[compound] + degradation_rate[compound] * lap. Both are fit from this
-        race's own real data (falling back to dataset-wide where this race lacks enough
-        data -- see _get_compound_base_pace / _get_compound_degradation_rate), so the
-        curve is race-specific, but raw per-lap real averages are never used directly --
-        they're noisy (fuel load, traffic, SC laps), so the smooth fitted curve is used
-        everywhere for consistency."""
+        """Predicted lap time per (lap, compound) AT TYRE AGE = lap, i.e. as if that
+        compound had been fitted since the start of the race: base_pace[compound] +
+        degradation_rate[compound] * lap. This is only correct for a single-stint
+        strategy -- a tyre fitted mid-race has true age far less than the race-lap
+        number. It is kept only for pre-solve tie-breaking / legacy display; the MILP
+        objectives (Scope1MilpModel, Scope2GoalModel) do NOT use this table -- they use
+        compound_base_pace/compound_degradation_rate directly together with each model's
+        own true per-stint tyre-age decision variable. See _build_compound_pace_params.
+        """
         base_pace = self._get_compound_base_pace(compounds, race_df=df)
         degradation_rate = self._get_compound_degradation_rate(compounds, race_df=df)
         lap_times: Dict[int, Dict[str, float]] = {}
@@ -320,6 +322,17 @@ class BackendOptimizationRunner:
             }
 
         return lap_times
+
+    def _build_compound_pace_params(
+        self, df: "pd.DataFrame", compounds: List[str]
+    ) -> tuple[Dict[str, float], Dict[str, float]]:
+        """(compound_base_pace, compound_degradation_rate) -- the real per-compound fitted
+        constants the MILP objectives use directly, together with their own true
+        tyre-age variable, instead of the race-lap-indexed predicted_lap_times table."""
+        return (
+            self._get_compound_base_pace(compounds, race_df=df),
+            self._get_compound_degradation_rate(compounds, race_df=df),
+        )
 
     def _get_available_compounds(self, race_df: "pd.DataFrame") -> List[str]:
         """Return the compounds actually present in a race's data, ordered softest to hardest.
@@ -537,6 +550,7 @@ class BackendOptimizationRunner:
         compounds = self._get_available_compounds(df)
         total_laps = int(df["Lap"].max()) if "Lap" in df.columns else 58
         lap_times_by_compound = self._build_predicted_lap_times(df, compounds, total_laps)
+        base_pace, degradation_rate = self._build_compound_pace_params(df, compounds)
         constraints = self._resolve_strategy_constraints(
             full_race_df, total_laps, min_pit_stops, min_stint_length
         )
@@ -559,6 +573,8 @@ class BackendOptimizationRunner:
             ),
             max_sets_per_compound=constraints["max_sets_per_compound"],
             predicted_lap_times=lap_times_by_compound,
+            compound_base_pace=base_pace,
+            compound_degradation_rate=degradation_rate,
         )
         return parameters, constraints
 
@@ -668,6 +684,7 @@ class BackendOptimizationRunner:
             compounds = self._get_available_compounds(df)
             total_laps = int(df["Lap"].max()) if "Lap" in df.columns else 58
             predicted = self._build_predicted_lap_times(df, compounds, total_laps)
+            base_pace, degradation_rate = self._build_compound_pace_params(df, compounds)
             constraints = self._resolve_strategy_constraints(
                 full_race_df, total_laps, min_pit_stops_input, min_stint_length_input
             )
@@ -797,6 +814,8 @@ class BackendOptimizationRunner:
                 max_stint_durability=max_stint_durability,
                 max_sets_per_compound=constraints["max_sets_per_compound"],
                 predicted_lap_times=predicted,
+                compound_base_pace=base_pace,
+                compound_degradation_rate=degradation_rate,
                 risk_tiers=risk_tiers,
                 max_risk_tier_per_compound=max_risk_tier_per_compound,
             )
@@ -818,6 +837,8 @@ class BackendOptimizationRunner:
                 max_stint_durability=max_stint_durability,
                 max_sets_per_compound=constraints["max_sets_per_compound"],
                 predicted_lap_times=predicted,
+                compound_base_pace=base_pace,
+                compound_degradation_rate=degradation_rate,
                 risk_tiers=risk_tiers,
                 max_risk_tier_per_compound=max_risk_tier_per_compound,
             )

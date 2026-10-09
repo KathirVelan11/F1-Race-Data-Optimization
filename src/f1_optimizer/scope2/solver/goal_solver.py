@@ -45,12 +45,26 @@ class Scope2GoalSolver:
                     best_value = value
                     best_compound = compound
             if best_compound is None:
+                # Fallback tie-break only (no solved x-values at all for this lap) --
+                # a fresh-tyre (age=1) pace comparison, since there's no stint context
+                # available here to know true age.
                 best_compound = min(
                     parameters.compounds,
-                    key=lambda item: parameters.predicted_lap_times.get(lap, {}).get(item, float("inf")),
+                    key=lambda item: (
+                        parameters.compound_base_pace.get(item, float("inf"))
+                        + parameters.compound_degradation_rate.get(item, 0.0)
+                    ),
                 )
             lap_compounds[lap] = best_compound
         return lap_compounds
+
+    @staticmethod
+    def _stint_time(parameters: Scope2Parameters, compound: str, stint_length: int) -> float:
+        """True predicted time for a stint of this compound and length, using tyre age
+        1..stint_length (NOT race-lap number) -- sum_{age=1}^{len} (base + rate*age)."""
+        base = parameters.compound_base_pace.get(compound, 0.0)
+        rate = parameters.compound_degradation_rate.get(compound, 0.0)
+        return stint_length * base + rate * (stint_length * (stint_length + 1) / 2)
 
     def _normalize_to_valid_stints(
         self,
@@ -158,13 +172,6 @@ class Scope2GoalSolver:
             for lap in range(1, parameters.total_laps)
             if pulp.value(model.variablesDict()[f"p_{lap}"]) is not None
         )
-        total_time = (
-            sum(
-                parameters.predicted_lap_times.get(lap, {}).get(compound, 0.0)
-                for lap, compound in lap_compounds.items()
-            )
-            + parameters.pit_loss_p * total_pit_stops
-        )
         risk_score = self._compute_risk_score(lap_compounds, parameters)
 
         stints: List[StintPlan] = []
@@ -174,10 +181,7 @@ class Scope2GoalSolver:
             if lap_compounds[lap] != current_compound:
                 stint_end = lap - 1
                 stint_length = stint_end - stint_start + 1
-                stint_time = sum(
-                    parameters.predicted_lap_times.get(lap_idx, {}).get(current_compound, 0.0)
-                    for lap_idx in range(stint_start, stint_end + 1)
-                )
+                stint_time = self._stint_time(parameters, current_compound, stint_length)
                 stints.append(
                     StintPlan(
                         stint_number=len(stints) + 1,
@@ -192,20 +196,20 @@ class Scope2GoalSolver:
                 stint_start = lap
 
         final_end = parameters.total_laps
-        final_time = sum(
-            parameters.predicted_lap_times.get(lap_idx, {}).get(current_compound, 0.0)
-            for lap_idx in range(stint_start, final_end + 1)
-        )
+        final_length = final_end - stint_start + 1
+        final_time = self._stint_time(parameters, current_compound, final_length)
         stints.append(
             StintPlan(
                 stint_number=len(stints) + 1,
                 compound=TyreCompound(current_compound),
                 start_lap=stint_start,
                 end_lap=final_end,
-                stint_length=final_end - stint_start + 1,
+                stint_length=final_length,
                 predicted_stint_time=final_time,
             )
         )
+
+        total_time = sum(stint.predicted_stint_time for stint in stints) + parameters.pit_loss_p * total_pit_stops
 
         deviations = GoalDeviations(
             d1_plus=float(pulp.value(model.variablesDict()["d1_plus"]) or 0.0),

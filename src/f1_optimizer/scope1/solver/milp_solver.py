@@ -39,12 +39,26 @@ class Scope1MilpSolver:
                     best_value = value
                     best_compound = compound
             if best_compound is None:
+                # Fallback tie-break only (no solved x-values at all for this lap) --
+                # a fresh-tyre (age=1) pace comparison, since there's no stint context
+                # available here to know true age.
                 best_compound = min(
                     parameters.compounds,
-                    key=lambda item: parameters.predicted_lap_times.get(lap, {}).get(item, float("inf")),
+                    key=lambda item: (
+                        parameters.compound_base_pace.get(item, float("inf"))
+                        + parameters.compound_degradation_rate.get(item, 0.0)
+                    ),
                 )
             lap_compounds[lap] = best_compound
         return lap_compounds
+
+    @staticmethod
+    def _stint_time(parameters: Scope1Parameters, compound: str, stint_length: int) -> float:
+        """True predicted time for a stint of this compound and length, using tyre age
+        1..stint_length (NOT race-lap number) -- sum_{age=1}^{len} (base + rate*age)."""
+        base = parameters.compound_base_pace.get(compound, 0.0)
+        rate = parameters.compound_degradation_rate.get(compound, 0.0)
+        return stint_length * base + rate * (stint_length * (stint_length + 1) / 2)
 
     def _normalize_to_valid_stints(
         self,
@@ -149,10 +163,7 @@ class Scope1MilpSolver:
             if lap_compounds[lap] != current_compound:
                 stint_end = lap - 1
                 stint_length = stint_end - stint_start + 1
-                stint_time = sum(
-                    parameters.predicted_lap_times.get(lap_idx, {}).get(current_compound, 0.0)
-                    for lap_idx in range(stint_start, stint_end + 1)
-                )
+                stint_time = self._stint_time(parameters, current_compound, stint_length)
                 stints.append(
                     StintPlan(
                         stint_number=len(stints) + 1,
@@ -168,10 +179,7 @@ class Scope1MilpSolver:
 
         final_end = parameters.total_laps
         final_length = final_end - stint_start + 1
-        final_time = sum(
-            parameters.predicted_lap_times.get(lap_idx, {}).get(current_compound, 0.0)
-            for lap_idx in range(stint_start, final_end + 1)
-        )
+        final_time = self._stint_time(parameters, current_compound, final_length)
         stints.append(
             StintPlan(
                 stint_number=len(stints) + 1,
@@ -188,7 +196,7 @@ class Scope1MilpSolver:
             optimal_pit_laps.append(stints[idx].start_lap - 1)
 
         total_race_time = (
-            sum(parameters.predicted_lap_times.get(lap, {}).get(compound, 0.0) for lap, compound in lap_compounds.items())
+            sum(stint.predicted_stint_time for stint in stints)
             + parameters.pit_loss_p * len(optimal_pit_laps)
         )
 

@@ -54,6 +54,8 @@ class Scope2Service:
                 }
                 for lap in range(1, race_context.total_laps + 1)
             },
+            compound_base_pace=dict(race_context.compound_base_times),
+            compound_degradation_rate=dict(race_context.compound_degradation_slopes),
             risk_tiers=self._risk_tiers_from_durability(race_context.compound_durability_limits),
         )
         return self.solver.solve(params)
