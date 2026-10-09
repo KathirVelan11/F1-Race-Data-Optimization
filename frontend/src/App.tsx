@@ -56,6 +56,8 @@ type StrategyPreview = {
   min_stint_length_valid_range?: [number, number]
   max_sets_per_compound?: Record<string, number>
   max_sets_per_compound_valid_range?: Record<string, [number, number]>
+  risk_tiers?: Record<string, [number, number, number]>
+  max_risk_tier_per_compound?: Record<string, number>
   risk_score?: number
   targets?: {
     target_race_time_seconds: number
@@ -105,6 +107,34 @@ function App() {
   const [maxSoftSetsInput, setMaxSoftSetsInput] = useState<string>('')
   const [maxMediumSetsInput, setMaxMediumSetsInput] = useState<string>('')
   const [maxHardSetsInput, setMaxHardSetsInput] = useState<string>('')
+  // Optional hard risk ceilings (Model 2 only). '' means "no limit" -- these are the
+  // only tyre-related inputs that are NOT required, since a user with no opinion on
+  // risk tolerance should just get the model's normal data-driven behavior.
+  const [maxSoftRiskTier, setMaxSoftRiskTier] = useState<string>('')
+  const [maxMediumRiskTier, setMaxMediumRiskTier] = useState<string>('')
+  const [maxHardRiskTier, setMaxHardRiskTier] = useState<string>('')
+
+  const RISK_TIER_NAMES = ['Low', 'Moderate', 'High', 'Very High']
+
+  // Builds the dropdown options for one compound, with the actual lap-age cutoffs shown
+  // inline once we know them (after the first run, from that race's real risk_tiers) --
+  // "Up to Moderate" alone doesn't tell a user anything; "Up to Moderate (tyre age <= 12
+  // laps)" does. Before the first run (tiers not known yet), falls back to tier names only.
+  const buildRiskTierOptions = (compound: string): { value: string; label: string }[] => {
+    const tiers = comparison?.scope2?.risk_tiers?.[compound]
+    const ageFor = (tierIndex: number): string => {
+      if (!tiers) return ''
+      if (tierIndex === 3) return ` (age > ${tiers[2]} laps)`
+      return ` (age ≤ ${tiers[tierIndex]} laps)`
+    }
+    return [
+      { value: '', label: 'No limit' },
+      { value: '0', label: `Low only${ageFor(0)}` },
+      { value: '1', label: `Up to Moderate${ageFor(1)}` },
+      { value: '2', label: `Up to High${ageFor(2)}` },
+      { value: '3', label: 'Up to Very High (no limit)' },
+    ]
+  }
 
   const MAX_REASONABLE_SETS = 20
 
@@ -360,12 +390,26 @@ function App() {
                   <div><span>Achieved risk score</span><strong>{payload.risk_score.toFixed(1)}</strong></div>
                 )}
               </div>
+              {payload.max_risk_tier_per_compound && Object.keys(payload.max_risk_tier_per_compound).length > 0 && (
+                <p className="block-hint">
+                  Risk ceilings applied: {Object.entries(payload.max_risk_tier_per_compound)
+                    .map(([compound, tier]) => {
+                      const tiers = payload.risk_tiers?.[compound]
+                      const tierName = RISK_TIER_NAMES[Number(tier)] ?? tier
+                      const ageHint = tiers ? ` (age ≤ ${tiers[Number(tier)]} laps)` : ''
+                      return `${compound} ≤ ${tierName}${ageHint}`
+                    })
+                    .join(', ')}
+                </p>
+              )}
             </div>
           )}
 
           {highlight === 'balanced' && (
             <div className="pit-stop-list">
-              <p className="block-hint">Pit loss at this track: {PIT_LOSS_SECONDS.toFixed(1)}s per stop (from recorded pit stop durations).</p>
+              <p className="block-hint">
+                Pit loss at this track: {pitLossKnown ? `${payload.pit_loss_seconds!.toFixed(1)}s` : 'unknown'} per stop (from recorded pit stop durations).
+              </p>
               <h4>Pit stops</h4>
               {pitStops.length === 0 ? (
                 <p className="empty-state">No pit stops in this strategy.</p>
@@ -446,6 +490,11 @@ function App() {
       if (maxMediumSetsInput.trim() !== '') maxSetsPerCompound.MEDIUM = Number(maxMediumSetsInput)
       if (maxHardSetsInput.trim() !== '') maxSetsPerCompound.HARD = Number(maxHardSetsInput)
 
+      const maxRiskTierPerCompound: Record<string, number> = {}
+      if (maxSoftRiskTier.trim() !== '') maxRiskTierPerCompound.SOFT = Number(maxSoftRiskTier)
+      if (maxMediumRiskTier.trim() !== '') maxRiskTierPerCompound.MEDIUM = Number(maxMediumRiskTier)
+      if (maxHardRiskTier.trim() !== '') maxRiskTierPerCompound.HARD = Number(maxHardRiskTier)
+
       const response = await fetch(`${API_BASE}/compare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -457,6 +506,7 @@ function App() {
           min_pit_stops: minPitStops,
           min_stint_length: minStintLength,
           max_sets_per_compound: Object.keys(maxSetsPerCompound).length ? maxSetsPerCompound : undefined,
+          max_risk_tier_per_compound: Object.keys(maxRiskTierPerCompound).length ? maxRiskTierPerCompound : undefined,
         }),
       })
 
@@ -778,6 +828,61 @@ function App() {
               </div>
             </div>
           </div>
+
+          {activeModelTab === 'model2' && (
+            <div className="controls-group">
+              <h4 className="controls-group-title">Max degradation-risk tier (Model 2 only)</h4>
+              <p className="block-hint">
+                Optional. Caps how worn a compound is ever allowed to get &mdash; a hard
+                limit, not just a preference. Leave "No limit" if you don't want to
+                restrict a compound.
+                {!comparison?.scope2?.risk_tiers && (
+                  <> Exact lap-age cutoffs for this race will show here after you run the
+                  first comparison (they depend on the selected race's own tyre data).</>
+                )}
+              </p>
+              <div className="controls-group-fields controls-group-fields--three">
+                <div className="field">
+                  <label htmlFor="max-soft-risk">Soft max risk</label>
+                  <select
+                    id="max-soft-risk"
+                    value={maxSoftRiskTier}
+                    onChange={(event) => setMaxSoftRiskTier(event.target.value)}
+                  >
+                    {buildRiskTierOptions('SOFT').map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="field">
+                  <label htmlFor="max-medium-risk">Medium max risk</label>
+                  <select
+                    id="max-medium-risk"
+                    value={maxMediumRiskTier}
+                    onChange={(event) => setMaxMediumRiskTier(event.target.value)}
+                  >
+                    {buildRiskTierOptions('MEDIUM').map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="field">
+                  <label htmlFor="max-hard-risk">Hard max risk</label>
+                  <select
+                    id="max-hard-risk"
+                    value={maxHardRiskTier}
+                    onChange={(event) => setMaxHardRiskTier(event.target.value)}
+                  >
+                    {buildRiskTierOptions('HARD').map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
 
           {activeModelTab === 'model2' && (
             <div className="controls-group controls-group--weights">

@@ -39,3 +39,12 @@ class Scope2Parameters(BaseModel):
             "scaled to that compound's own real durability."
         ),
     )
+    max_risk_tier_per_compound: Dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Optional per-compound hard ceiling on degradation-risk tier (0=low, "
+            "1=moderate, 2=high, 3=very high). A compound present here can never be run "
+            "into an age beyond the given tier, regardless of goal weights. A compound "
+            "absent from this dict has no ceiling (full durability range allowed)."
+        ),
+    )

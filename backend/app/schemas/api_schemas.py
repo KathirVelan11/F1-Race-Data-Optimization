@@ -33,6 +33,7 @@ class OptimizeScope2Request(BaseModel):
     min_pit_stops: Optional[int] = None
     min_stint_length: Optional[int] = None
     max_sets_per_compound: Optional[Dict[str, int]] = None
+    max_risk_tier_per_compound: Optional[Dict[str, int]] = None
     weights: GoalWeights = Field(default_factory=GoalWeights)
 
 
@@ -45,4 +46,5 @@ class CompareStrategiesRequest(BaseModel):
     min_pit_stops: Optional[int] = None
     min_stint_length: Optional[int] = None
     max_sets_per_compound: Optional[Dict[str, int]] = None
+    max_risk_tier_per_compound: Optional[Dict[str, int]] = None
     weights: GoalWeights = Field(default_factory=GoalWeights)

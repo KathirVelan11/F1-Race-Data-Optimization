@@ -178,6 +178,31 @@ class BackendOptimizationRunner:
             "max_sets_per_compound_feasible": sum(resolved.values()) >= total_stints_needed,
         }
 
+    @staticmethod
+    def _resolve_max_risk_tier_per_compound(
+        compounds: List[str],
+        requested: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, int]:
+        """Resolve the user's optional per-compound max acceptable degradation-risk tier
+        (0=low, 1=moderate, 2=high, 3=very high -- see _get_degradation_risk_tiers).
+
+        This is a genuine hard ceiling enforced in Scope2GoalModel (le_k forced to 1 for
+        all laps beyond the chosen tier), not a soft preference. A compound the user
+        didn't set, or set to 3 (very high / "no limit"), is simply left out of the
+        returned dict -- Scope2GoalModel only restricts compounds present in it.
+        Out-of-range values are clamped into [0, 3] rather than rejected, since a
+        ceiling is a UI convenience, not a safety-critical input worth a hard error.
+        """
+        resolved: Dict[str, int] = {}
+        for compound in compounds:
+            requested_value = (requested or {}).get(compound)
+            if requested_value is None:
+                continue
+            tier = max(0, min(3, int(requested_value)))
+            if tier < 3:
+                resolved[compound] = tier
+        return resolved
+
     def _get_max_stint_durability(
         self,
         compounds: List[str],
@@ -605,6 +630,7 @@ class BackendOptimizationRunner:
         min_pit_stops_input = request_data.get("min_pit_stops")
         min_stint_length_input = request_data.get("min_stint_length")
         max_sets_per_compound_input = request_data.get("max_sets_per_compound")
+        max_risk_tier_input = request_data.get("max_risk_tier_per_compound")
 
         try:
             scope1 = self.build_strategy_preview(
@@ -662,6 +688,34 @@ class BackendOptimizationRunner:
             )
             risk_tiers = self._get_degradation_risk_tiers(max_stint_durability)
             target_risk = self._get_target_risk_score(full_race_df, risk_tiers)
+            max_risk_tier_per_compound = self._resolve_max_risk_tier_per_compound(
+                compounds, max_risk_tier_input
+            )
+
+            # A requested risk ceiling can make the compound physically unusable if its
+            # tier threshold is smaller than the minimum stint length (no valid stint
+            # could ever stay within the ceiling) -- surface that as a clear rejection
+            # rather than handing an infeasible model to the solver.
+            infeasible_ceilings = []
+            for compound, max_tier in max_risk_tier_per_compound.items():
+                tier_threshold = risk_tiers.get(compound, [0, 0, 0])[max_tier]
+                if tier_threshold < constraints["min_stint_length"]:
+                    infeasible_ceilings.append(
+                        f"{compound} (ceiling allows age<={tier_threshold}, "
+                        f"but min stint length is {constraints['min_stint_length']})"
+                    )
+            if infeasible_ceilings:
+                return {
+                    "year": year,
+                    "race_name": race_name,
+                    "driver_code": driver_code,
+                    "strategy": [],
+                    "max_risk_tier_per_compound": max_risk_tier_per_compound,
+                    "message": (
+                        "Risk ceiling too strict for: " + "; ".join(infeasible_ceilings) +
+                        ". Raise the allowed risk tier for that compound, or lower min stint length."
+                    ),
+                }
 
             params = Scope2Parameters(
                 total_laps=total_laps,
@@ -679,6 +733,7 @@ class BackendOptimizationRunner:
                 max_sets_per_compound=constraints["max_sets_per_compound"],
                 predicted_lap_times=predicted,
                 risk_tiers=risk_tiers,
+                max_risk_tier_per_compound=max_risk_tier_per_compound,
             )
             result = Scope2GoalSolver().solve(params)
             stints = [
@@ -706,6 +761,7 @@ class BackendOptimizationRunner:
                 "max_sets_per_compound": params.max_sets_per_compound,
                 "max_sets_per_compound_valid_range": constraints["max_sets_per_compound_valid_range"],
                 "risk_tiers": risk_tiers,
+                "max_risk_tier_per_compound": params.max_risk_tier_per_compound,
                 "targets": {
                     "target_race_time_seconds": round(scope1_target, 2),
                     "target_pit_stops": target_pit_stops,

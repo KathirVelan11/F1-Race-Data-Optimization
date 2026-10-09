@@ -204,6 +204,30 @@ class Scope2GoalModel:
                 model += a <= t2 + tier_big_m * (1 - le2)
                 model += a <= t3 + tier_big_m * (1 - le3)
 
+        # --- User-requested hard risk ceiling (optional, per compound) ----------------
+        # If the user picked a max acceptable risk tier for a compound (e.g. "never let
+        # SOFT exceed Moderate"), that's enforced as a genuine hard constraint here, not
+        # just a preference folded into Goal 3's target -- the solver is not allowed to
+        # pick a strategy that runs that compound's age past the corresponding tier
+        # threshold at all, regardless of how the w1/w2/w3 weights are set.
+        #   max tier 0 (low)       -> age <= t1 always (le1 forced to 1)
+        #   max tier 1 (moderate)  -> age <= t2 always (le2 forced to 1)
+        #   max tier 2 (high)      -> age <= t3 always (le3 forced to 1)
+        #   max tier 3 (very high) -> no additional restriction (le3 already covers it)
+        for compound, max_tier in self.params.max_risk_tier_per_compound.items():
+            if compound not in compounds:
+                continue
+            if max_tier == 0:
+                for lap in laps:
+                    model += le[(lap, compound, 1)] == 1
+            elif max_tier == 1:
+                for lap in laps:
+                    model += le[(lap, compound, 2)] == 1
+            elif max_tier == 2:
+                for lap in laps:
+                    model += le[(lap, compound, 3)] == 1
+            # max_tier >= 3: no restriction needed, very-high is already the ceiling.
+
         risk_score = pulp.lpSum(
             (3 - le[(lap, compound, 1)] - le[(lap, compound, 2)] - le[(lap, compound, 3)])
             for lap in laps
