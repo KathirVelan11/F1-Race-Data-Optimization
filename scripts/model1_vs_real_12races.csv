@@ -1,0 +1,13 @@
+year,race,real_driver,real_time_seconds,m1_race_time_seconds,m1_delta_vs_real_seconds,group
+2019,Singapore Grand Prix,VET,7113.67,7094.96,-18.71,m1_faster
+2020,Emilia Romagna Grand Prix,HAM,5312.43,5311.02,-1.41,m1_faster
+2020,Russian Grand Prix,BOT,5640.36,5622.82,-17.54,m1_faster
+2021,Portuguese Grand Prix,HAM,5671.42,5583.88,-87.54,m1_faster
+2022,Australian Grand Prix,LEC,5266.55,5198.33,-68.22,m1_faster
+2022,Italian Grand Prix,VER,4827.51,4807.12,-20.39,m1_faster
+2022,Saudi Arabian Grand Prix,VER,5059.29,5052.46,-6.83,m1_faster
+2023,British Grand Prix,VER,5116.94,5034.60,-82.34,m1_faster
+2023,Japanese Grand Prix,VER,5458.42,5385.38,-73.04,m1_faster
+2023,Las Vegas Grand Prix,VER,5348.29,5333.56,-14.73,m1_faster
+2023,Saudi Arabian Grand Prix,PER,4874.89,4893.04,18.15,closest_otherwise
+2019,Brazilian Grand Prix,VER,5594.68,5615.60,20.92,closest_otherwise
