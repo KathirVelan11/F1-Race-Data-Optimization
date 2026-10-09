@@ -35,5 +35,5 @@ ax.grid(axis="y", linestyle="-", alpha=0.3)
 fig.tight_layout()
 
 out_path = HERE / "model1_vs_real_12races.png"
-fig.savefig(out_path, dpi=150)
+fig.savefig(out_path, dpi=1200)
 print(f"Saved {out_path}")
