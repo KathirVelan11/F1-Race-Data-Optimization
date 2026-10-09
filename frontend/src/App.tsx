@@ -51,6 +51,7 @@ type StrategyPreview = {
   objective_value_z?: number
   pit_loss_seconds?: number
   min_pit_stops?: number
+  max_pit_stops?: number
   min_stint_length?: number
   min_pit_stops_valid_range?: [number, number]
   min_stint_length_valid_range?: [number, number]
@@ -103,6 +104,9 @@ function App() {
   const [activeModelTab, setActiveModelTab] = useState<'model1' | 'model2'>('model1')
   const [overview, setOverview] = useState<DatasetOverview | null>(null)
   const [minPitStopsInput, setMinPitStopsInput] = useState<string>('')
+  // Max pit stops (Model 2 only -- hard ceiling + Goal 2's target P*). '' means "no
+  // extra ceiling beyond min pit stops" (backend defaults it to min_pit_stops itself).
+  const [maxPitStopsInput, setMaxPitStopsInput] = useState<string>('')
   const [minStintLengthInput, setMinStintLengthInput] = useState<string>('')
   const [maxSoftSetsInput, setMaxSoftSetsInput] = useState<string>('')
   const [maxMediumSetsInput, setMaxMediumSetsInput] = useState<string>('')
@@ -116,16 +120,32 @@ function App() {
 
   const RISK_TIER_NAMES = ['Low', 'Moderate', 'High', 'Very High']
 
-  // Builds the dropdown options for one compound, with the actual lap-age cutoffs shown
-  // inline once we know them (after the first run, from that race's real risk_tiers) --
-  // "Up to Moderate" alone doesn't tell a user anything; "Up to Moderate (tyre age <= 12
-  // laps)" does. Before the first run (tiers not known yet), falls back to tier names only.
+  // Same 40%/70%/90%-of-durability split the backend uses (see
+  // BackendOptimizationRunner._get_degradation_risk_tiers) -- mirrored here client-side
+  // purely to show a reasonable estimate in the dropdown before the user has run a
+  // comparison yet (dataset-wide average durability, from /api/dataset/overview, not
+  // this specific race's real durability, which isn't known until a run completes).
+  const estimateTiersFromDurability = (durability: number): [number, number, number] => {
+    const t1 = Math.max(1, Math.round(durability * 0.4))
+    const t2 = Math.max(t1 + 1, Math.round(durability * 0.7))
+    const t3 = Math.max(t2 + 1, Math.round(durability * 0.9))
+    return [t1, t2, t3]
+  }
+
+  // Builds the dropdown options for one compound, with lap-age cutoffs shown inline so
+  // "Up to Moderate" never appears alone -- "Up to Moderate (tyre age <= 12 laps)" does.
+  // Prefers this race's real risk_tiers (known once a comparison has run); before that,
+  // falls back to a dataset-wide estimate from the overview stats, labeled "approx" since
+  // it isn't specific to the selected race/circuit yet.
   const buildRiskTierOptions = (compound: string): { value: string; label: string }[] => {
-    const tiers = comparison?.scope2?.risk_tiers?.[compound]
+    const realTiers = comparison?.scope2?.risk_tiers?.[compound]
+    const estimatedDurability = overview?.mean_max_stint_life_by_compound?.[compound]
+    const tiers = realTiers ?? (estimatedDurability ? estimateTiersFromDurability(estimatedDurability) : null)
+    const approxSuffix = realTiers ? '' : ', approx'
     const ageFor = (tierIndex: number): string => {
       if (!tiers) return ''
-      if (tierIndex === 3) return ` (age > ${tiers[2]} laps)`
-      return ` (age ≤ ${tiers[tierIndex]} laps)`
+      if (tierIndex === 3) return ` (age > ${tiers[2]} laps${approxSuffix})`
+      return ` (age ≤ ${tiers[tierIndex]} laps${approxSuffix})`
     }
     return [
       { value: '', label: 'No limit' },
@@ -169,7 +189,27 @@ function App() {
     const hard = parseSetCount(maxHardSetsInput, 'Hard sets')
     const pitStops = parseSetCount(minPitStopsInput, 'Min pit stops')
 
-    const fieldErrors = [soft.error, medium.error, hard.error, pitStops.error].filter(
+    // Max pit stops is optional (blank = no extra ceiling beyond min pit stops, same
+    // convention as the risk-ceiling dropdowns) -- only validated when entered.
+    const maxPitStopsTrimmed = maxPitStopsInput.trim()
+    let maxPitStopsError: string | null = null
+    let maxPitStopsValue: number | null = null
+    if (maxPitStopsTrimmed !== '') {
+      const parsed = Number(maxPitStopsTrimmed)
+      if (!Number.isFinite(parsed)) {
+        maxPitStopsError = 'Max pit stops: enter a number.'
+      } else if (!Number.isInteger(parsed)) {
+        maxPitStopsError = 'Max pit stops: must be a whole number.'
+      } else if (parsed < 0) {
+        maxPitStopsError = 'Max pit stops: cannot be negative.'
+      } else if (pitStops.error === null && parsed < pitStops.value) {
+        maxPitStopsError = `Max pit stops (${parsed}) cannot be less than min pit stops (${pitStops.value}).`
+      } else {
+        maxPitStopsValue = parsed
+      }
+    }
+
+    const fieldErrors = [soft.error, medium.error, hard.error, pitStops.error, maxPitStopsError].filter(
       (error): error is string => error !== null
     )
 
@@ -189,8 +229,9 @@ function App() {
       errors: allErrors,
       totalSets,
       stintsNeeded,
+      maxPitStopsValue,
     }
-  }, [maxSoftSetsInput, maxMediumSetsInput, maxHardSetsInput, minPitStopsInput])
+  }, [maxSoftSetsInput, maxMediumSetsInput, maxHardSetsInput, minPitStopsInput, maxPitStopsInput])
 
   useEffect(() => {
     const loadDashboard = async () => {
@@ -483,6 +524,7 @@ function App() {
     setLoading(true)
     try {
       const minPitStops = minPitStopsInput.trim() === '' ? undefined : Number(minPitStopsInput)
+      const maxPitStops = maxPitStopsInput.trim() === '' ? undefined : Number(maxPitStopsInput)
       const minStintLength = minStintLengthInput.trim() === '' ? undefined : Number(minStintLengthInput)
 
       const maxSetsPerCompound: Record<string, number> = {}
@@ -504,6 +546,7 @@ function App() {
           driver_code: selectedDriver || undefined,
           weights,
           min_pit_stops: minPitStops,
+          max_pit_stops: maxPitStops,
           min_stint_length: minStintLength,
           max_sets_per_compound: Object.keys(maxSetsPerCompound).length ? maxSetsPerCompound : undefined,
           max_risk_tier_per_compound: Object.keys(maxRiskTierPerCompound).length ? maxRiskTierPerCompound : undefined,
@@ -741,6 +784,20 @@ function App() {
               </div>
 
               <div className="field">
+                <label htmlFor="max-pit-stops">
+                  Max pit stops <small className="field-hint">(Model 2 only -- sets P*)</small>
+                </label>
+                <input
+                  id="max-pit-stops"
+                  type="number"
+                  min={0}
+                  placeholder="No extra limit"
+                  value={maxPitStopsInput}
+                  onChange={(event) => setMaxPitStopsInput(event.target.value)}
+                />
+              </div>
+
+              <div className="field">
                 <label htmlFor="min-stint-length">
                   Min stint length (laps)
                   {comparison?.scope1?.min_stint_length_valid_range && (
@@ -837,8 +894,9 @@ function App() {
                 limit, not just a preference. Leave "No limit" if you don't want to
                 restrict a compound.
                 {!comparison?.scope2?.risk_tiers && (
-                  <> Exact lap-age cutoffs for this race will show here after you run the
-                  first comparison (they depend on the selected race's own tyre data).</>
+                  <> Lap-age cutoffs shown below are dataset-wide approximations until
+                  you run a comparison &mdash; after that, they're recalculated exactly
+                  for the selected race's own tyre data.</>
                 )}
               </p>
               <div className="controls-group-fields controls-group-fields--three">

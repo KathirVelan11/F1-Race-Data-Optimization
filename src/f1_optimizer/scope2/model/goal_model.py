@@ -20,16 +20,26 @@ zone costs more here, even if it's marginally faster), rather than a static labe
 Goals, normalized by their own target so d1+/d2+/d3+ are comparable fractional
 deviations (0 = exactly on target) rather than raw units of wildly different scale --
 without this, w1/w2/w3 cannot meaningfully trade off against each other:
-    Goal 1 (Time):   T/T* + d1- - d1+ = 1
-    Goal 2 (Stops):  P/P* + d2- - d2+ = 1
-    Goal 3 (Risk):   R/R* + d3- - d3+ = 1   (R = sum of per-lap risk-tier weights)
+    Goal 1 (Time):   T/T* + d1- - d1+ = 1   (T* = Model 1's solved optimum)
+    Goal 2 (Stops):  P/P* + d2- - d2+ = 1   (P* = user's max_pit_stops input)
+    Goal 3 (Risk):   R/R* + d3- - d3+ = 1   (R = sum of per-lap risk-tier weights;
+                                              R* = the true minimum risk score
+                                              achievable under this race's constraints,
+                                              from a dedicated minimize-risk solve --
+                                              see BackendOptimizationRunner._get_min_achievable_risk_score)
+
+Pit stops also carry a genuine hard ceiling (total_pit_stops <= max_pit_stops), on top
+of the existing floor (>= min_pit_stops) -- both user-supplied, Model 2 only. Goal 2
+still exists on top of that range to express a *preference* for staying near P* (the
+ceiling itself), not just anywhere inside [min_pit_stops, max_pit_stops].
 
 Objective:
     min Z = w1 * d1+ + w2 * d2+ + w3 * d3+
 
 Subject to:
-    Standard race assignment constraints (a)-(f), plus age-tracking and risk-tier
-    derivation constraints (see build() for the full big-M encoding).
+    Standard race assignment constraints (a)-(f), the min/max pit-stop range, plus
+    age-tracking and risk-tier derivation constraints (see build() for the full big-M
+    encoding).
 """
 from typing import Any
 
@@ -41,8 +51,17 @@ from src.f1_optimizer.scope2.parameters.scope2_parameters import Scope2Parameter
 class Scope2GoalModel:
     """Builder for Scope 2 Goal Programming Model."""
 
-    def __init__(self, parameters: Scope2Parameters):
+    def __init__(self, parameters: Scope2Parameters, minimize_risk_only: bool = False):
+        """`minimize_risk_only=True` builds the exact same model (every constraint,
+        including the user's max_risk_tier_per_compound ceilings and min/max pit stops)
+        but swaps the objective to `minimize risk_score` directly, ignoring time/pit-stop
+        goals entirely. Used once, before the real solve, purely to compute R* -- the
+        true minimum risk score achievable under this race's constraints (see
+        BackendOptimizationRunner._get_min_achievable_risk_score). This mirrors how T*
+        is already Model 1's own solved optimum rather than an assumed value.
+        """
         self.params = parameters
+        self.minimize_risk_only = minimize_risk_only
         self._model: Any = None
 
     def build(self) -> Any:
@@ -97,6 +116,7 @@ class Scope2GoalModel:
                 model += p[lap] >= x[(lap + 1, compound)] - x[(lap, compound)]
 
         model += total_pit_stops >= self.params.min_pit_stops
+        model += total_pit_stops <= self.params.max_pit_stops
 
         for lap in laps:
             for compound in compounds:
@@ -233,14 +253,19 @@ class Scope2GoalModel:
             for lap in laps
             for compound in compounds
         )
+        # Kept on self so callers can read pulp.value(self.risk_score) after solving --
+        # used by the R*-discovery pass (minimize_risk_only) to extract the achieved
+        # minimum risk score directly, without needing the full stint-extraction pipeline
+        # Scope2GoalSolver normally runs for a real strategy result.
+        self.risk_score = risk_score
 
         # Normalize each goal by its own target so d1+/d2+/d3+ are comparable fractional
         # deviations (see module docstring) -- a target of 0 would make division
-
-        # Normalize each goal by its own target so d1+/d2+/d3+ are comparable fractional
-        # deviations (see module docstring) -- a target of 0 would make division
-        # meaningless, so such a goal falls back to an un-normalized (raw-unit) constraint,
-        # which only happens for a goal that's already trivially at/near zero anyway.
+        # meaningless, so such a goal falls back to an un-normalized (raw-unit) constraint.
+        # risk_target (R*) is the true minimum achievable risk score for this race's
+        # constraints (see BackendOptimizationRunner._get_min_achievable_risk_score), so
+        # it's normally > 0 and only hits this fallback in the edge case where a strategy
+        # can genuinely keep every lap in the lowest risk tier.
         time_target = self.params.targets.target_race_time_t_star
         pit_stops_target = self.params.targets.target_pit_stops_p_star
         risk_target = self.params.targets.target_degradation_d_star
@@ -253,11 +278,20 @@ class Scope2GoalModel:
         model += (total_pit_stops / pit_stops_scale) + d2_minus - d2_plus == (pit_stops_target / pit_stops_scale)
         model += (risk_score / risk_scale) + d3_minus - d3_plus == (risk_target / risk_scale)
 
-        model += (
-            self.params.weights.weight_time_w1 * d1_plus
-            + self.params.weights.weight_pit_stops_w2 * d2_plus
-            + self.params.weights.weight_degradation_w3 * d3_plus
-        )
+        if self.minimize_risk_only:
+            # R*-discovery pass: ignore time/pit-stop goals, find the true minimum risk
+            # score reachable under every other constraint already built above (stint
+            # lengths, durability, tyre-set limits, min/max pit stops, and any
+            # max_risk_tier_per_compound ceilings). The goal equality constraints above
+            # still hold (harmless -- d1/d2/d3 just float to whatever the risk-minimal
+            # strategy happens to produce) but play no part in this objective.
+            model += risk_score
+        else:
+            model += (
+                self.params.weights.weight_time_w1 * d1_plus
+                + self.params.weights.weight_pit_stops_w2 * d2_plus
+                + self.params.weights.weight_degradation_w3 * d3_plus
+            )
 
         self._model = model
         return model

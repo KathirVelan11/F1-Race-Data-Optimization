@@ -182,13 +182,22 @@ Scope1OptimizationResult:
   pit_stop_count: int
   stints: List[StintPlan]
 ```
-The integration layer feeds $T^*$ into Scope 2 as Goal 1 target:
+The integration layer feeds $T^*$ into Scope 2 as Goal 1 target. All three targets are
+"best achievable" values, not arbitrary or historical estimates -- $T^*$ and $R^*$ are
+each the real solved optimum of their own goal in isolation (via a dedicated MILP/Goal
+Programming solve), and $P^*$ is the user's own `max_pit_stops` input:
 ```python
 GoalTargets:
-  target_race_time_t_star = scope1_result.minimum_predicted_race_time
-  target_pit_stops_p_star = user_selected_p_star
-  target_degradation_d_star = user_selected_d_star
+  target_race_time_t_star = scope1_result.minimum_predicted_race_time        # T*: Model 1's solved optimum
+  target_pit_stops_p_star = user_max_pit_stops                               # P*: user's max_pit_stops input directly
+  target_degradation_d_star = min_achievable_risk_score                      # R*: solved via minimize_risk_only pass
+                                                                               #     (BackendOptimizationRunner._get_min_achievable_risk_score)
 ```
+`max_pit_stops` is also enforced as a genuine hard ceiling on total pit stops in Model 2
+(on top of the existing `min_pit_stops` floor) -- see
+`docs/mathematical-models/scope2_goal_programming.md` section 6 for the full list of
+user inputs and what scope (Model 1 / Model 2 / both) each one applies to.
+
 Scope 2 solves the Goal Program minimizing weighted deviations $Z = \sum w_k d_k^+$ and returns:
 ```python
 Scope2OptimizationResult:

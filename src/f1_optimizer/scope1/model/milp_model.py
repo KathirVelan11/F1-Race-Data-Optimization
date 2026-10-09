@@ -19,6 +19,7 @@ Decision Variables:
     p_l = 1 if a pit stop occurs after lap l, 0 otherwise
     start_{l,c} = 1 if a new stint on compound c begins on lap l, 0 otherwise
 """
+
 from typing import Any
 
 import pulp

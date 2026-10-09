@@ -21,6 +21,14 @@ class Scope2Parameters(BaseModel):
     targets: GoalTargets = Field(..., description="Goal targets T*, P*, D*")
     weights: GoalWeights = Field(default_factory=GoalWeights, description="Priority weights w1, w2, w3")
     min_pit_stops: int = Field(..., description="Min pit stops, derived from real data or user input")
+    max_pit_stops: int = Field(
+        ...,
+        description=(
+            "Max pit stops, from user input (see BackendOptimizationRunner.run_scope2). "
+            "Enforced as a genuine hard ceiling in Scope2GoalModel (Model 2 only -- Model "
+            "1/MILP has no pit-stop ceiling). Also used directly as Goal 2's target P*."
+        ),
+    )
     min_stint_length: int = Field(..., description="Min stint length, derived from real data or user input")
     max_stint_durability: Dict[str, int] = Field(
         ..., description="L_c^max maximum durable stint length for compound c, derived from real tyre-life data"

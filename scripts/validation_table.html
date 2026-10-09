@@ -1,0 +1,317 @@
+<title>Real vs predicted</title>
+<style>
+  :root{
+    --bg:#f6f5f2; --surface:#ffffff; --surface-2:#f0eee8;
+    --text:#1a1d1f; --text-dim:#5c6166; --border:#e2e0d9;
+    --accent:#c4442e; --accent-soft:#f3ded8;
+    --ok:#2f7d4f; --ok-bg:#e4f3e9;
+    --fail:#c4442e; --fail-bg:#fbe8e4;
+    --warn:#a16a0a; --warn-bg:#fbf0d9;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+    --sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    color-scheme: light;
+  }
+  :root:not([data-theme="light"]){
+    @media (prefers-color-scheme: dark){
+      --bg:#15171a; --surface:#1d2023; --surface-2:#24282c;
+      --text:#eceae4; --text-dim:#9aa0a6; --border:#303539;
+      --accent:#e2694f; --accent-soft:#3a251f;
+      --ok:#4fbd7c; --ok-bg:#163826;
+      --fail:#e2694f; --fail-bg:#3a211d;
+      --warn:#e0b04a; --warn-bg:#3a2f14;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#15171a; --surface:#1d2023; --surface-2:#24282c;
+    --text:#eceae4; --text-dim:#9aa0a6; --border:#303539;
+    --accent:#e2694f; --accent-soft:#3a251f;
+    --ok:#4fbd7c; --ok-bg:#163826;
+    --fail:#e2694f; --fail-bg:#3a211d;
+    --warn:#e0b04a; --warn-bg:#3a2f14;
+    color-scheme: dark;
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans); padding-inline:16px; padding-block:28px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px; margin:0 auto;}
+
+  header{margin-bottom:20px;}
+  .eyebrow{
+    font-family:var(--mono); font-size:11px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--accent); margin:0 0 8px;
+  }
+  h1{margin:0 0 6px; font-size:clamp(1.4rem,3vw,1.9rem); letter-spacing:-0.01em;}
+  .sub{color:var(--text-dim); font-size:13.5px; margin:0; max-width:70ch; line-height:1.55;}
+
+  .stat-row{
+    display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin:22px 0;
+  }
+  .stat{
+    background:var(--surface); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px;
+  }
+  .stat .label{font-size:10.5px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-dim); margin-bottom:6px;}
+  .stat .value{font-family:var(--mono); font-size:1.4rem; font-variant-numeric:tabular-nums;}
+  .stat .note{font-size:11px; color:var(--text-dim); margin-top:3px;}
+  .stat.accent .value{color:var(--accent);}
+  .stat.good .value{color:var(--ok);}
+
+  .callout{
+    background:var(--warn-bg); border:1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+    border-radius:10px; padding:12px 16px; margin-bottom:20px; font-size:12.5px; line-height:1.6; color:var(--text);
+  }
+  .callout strong{color:var(--warn);}
+
+  .filter-row{display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;}
+  .tab-btn{
+    font-family:var(--sans); font-size:12.5px; font-weight:600; padding:7px 14px; border-radius:8px;
+    border:1px solid var(--border); background:var(--surface); color:var(--text-dim); cursor:pointer;
+  }
+  .tab-btn.active{background:var(--accent); color:#fff; border-color:var(--accent);}
+  .year-select{
+    font-family:var(--sans); font-size:12.5px; padding:7px 10px; border-radius:8px;
+    border:1px solid var(--border); background:var(--surface); color:var(--text);
+  }
+
+  table{width:100%; border-collapse:collapse; font-size:12.5px;}
+  thead th{
+    text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--text-dim); font-weight:600; padding:8px 9px; border-bottom:1px solid var(--border);
+    position:sticky; top:0; background:var(--bg);
+  }
+  thead th.group-real{color:var(--ok);}
+  thead th.group-pred{color:var(--accent);}
+  tbody tr{border-bottom:1px solid var(--border);}
+  tbody tr:hover{background:var(--surface-2);}
+  td{padding:6px 9px; font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap;}
+  td.race-cell{font-family:var(--sans); white-space:normal; max-width:160px;}
+  td.strategy-cell{font-family:var(--mono); font-size:11px; white-space:normal; max-width:220px; color:var(--text-dim);}
+  .table-scroll{overflow-x:auto; max-height:70vh; overflow-y:auto; border:1px solid var(--border); border-radius:10px; background:var(--surface);}
+
+  .pill{
+    display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:999px;
+    font-size:11px; font-weight:600; font-family:var(--sans);
+  }
+  .pill.ok{background:var(--ok-bg); color:var(--ok);}
+  .pill.fail{background:var(--fail-bg); color:var(--fail);}
+  .pill.warn{background:var(--warn-bg); color:var(--warn);}
+  .dot{width:6px;height:6px;border-radius:50%;background:currentColor;}
+
+  .delta{font-weight:700;}
+  .delta.faster{color:var(--ok);}
+  .delta.slower{color:var(--text-dim);}
+
+  .section-year{
+    font-family:var(--mono); font-size:10.5px; color:var(--text-dim); background:var(--surface-2) !important;
+    font-weight:700;
+  }
+  .section-year td{padding:5px 9px; background:var(--surface-2);}
+
+  .loading{padding:40px; text-align:center; color:var(--text-dim); font-size:13px;}
+
+  .footer{margin-top:20px; color:var(--text-dim); font-size:12px; line-height:1.6;}
+  .footer code{font-family:var(--mono); background:var(--surface-2); padding:1px 5px; border-radius:4px;}
+
+  @media (max-width:620px){
+    .stat-row{grid-template-columns:repeat(2,1fr);}
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">F1 Strategy Optimizer &middot; Real vs. predicted &middot; Full 148-race sweep</p>
+    <h1>How close are the models to what actually happened?</h1>
+    <p class="sub">
+      For each race, "real" is the fastest driver who finished the full distance (DNFs excluded) &mdash;
+      their actual total time, pit stop count and tyre sequence from the dataset. "Predicted" is what
+      Model 1 (MILP, fastest) and Model 2 (Goal Programming, balanced) each calculated independently,
+      with no knowledge of what really happened. All 148 races across 2018&ndash;2024 validated; both
+      models solved to <strong>Optimal</strong> on every race except 2 transient solver failures (retried
+      separately).
+    </p>
+  </header>
+
+  <div class="callout">
+    <strong>Known data issue (9 of 148 races):</strong> red-flag or multi-safety-car races record the
+    stoppage time as part of one lap's duration in the raw dataset (e.g. a 90s lap becomes a 3000s+
+    "lap"), inflating the real baseline. A &gt;3&times; race-median lap-time filter removes most of this,
+    but a few heavily-disrupted races (2020 Italian GP, 2022 Singapore GP, 2023/2024 Brazil, among others)
+    still carry a residual skew &mdash; flagged with a "data issue" pill below. Excluding all flagged races,
+    Model 1's average delta is <strong>+39.4s</strong> vs. the clean <strong>+81.3s</strong> across everything.
+  </div>
+
+  <div class="stat-row">
+    <div class="stat accent">
+      <div class="label">Races validated</div>
+      <div class="value">148 / 148</div>
+      <div class="note">2018&ndash;2024, full sweep complete</div>
+    </div>
+    <div class="stat good">
+      <div class="label">Model 1 avg delta</div>
+      <div class="value">+81.3s</div>
+      <div class="note">36/147 beat the real fastest</div>
+    </div>
+    <div class="stat good">
+      <div class="label">Model 2 avg delta</div>
+      <div class="value">+67.4s</div>
+      <div class="note">46/146 beat the real fastest</div>
+    </div>
+    <div class="stat">
+      <div class="label">Model 1 median delta</div>
+      <div class="value">+84.9s</div>
+      <div class="note">more robust than the mean</div>
+    </div>
+    <div class="stat">
+      <div class="label">Flagged outliers</div>
+      <div class="value">9</div>
+      <div class="note">red-flag data contamination</div>
+    </div>
+  </div>
+
+  <div class="filter-row">
+    <button class="tab-btn active" data-model="all">Both models</button>
+    <button class="tab-btn" data-model="Model1_MILP">Model 1 only</button>
+    <button class="tab-btn" data-model="Model2_GoalProgramming">Model 2 only</button>
+    <select class="year-select" id="year-filter">
+      <option value="all">All years</option>
+    </select>
+  </div>
+
+  <div class="table-scroll">
+    <table id="report-table">
+      <thead>
+        <tr>
+          <th>Year</th>
+          <th>Race</th>
+          <th>Model</th>
+          <th class="group-real">Real driver</th>
+          <th class="group-real">Real time</th>
+          <th class="group-real">Real stops</th>
+          <th class="group-real">Real strategy</th>
+          <th class="group-pred">Predicted time</th>
+          <th class="group-pred">Pred. stops</th>
+          <th>Delta</th>
+        </tr>
+      </thead>
+      <tbody id="table-body">
+        <tr><td colspan="10" class="loading">Loading comparison data…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="footer">
+    Source: <code>scripts/compare_to_real.py</code>, run against <code>scripts/validation_report.csv</code>
+    (full 148-race run) and <code>data/processed/combined_dataset.csv</code>. Negative delta = model
+    predicts a faster time than the real fastest finisher; positive = model predicts slower. Data file:
+    <code>real_vs_predicted.csv</code>.
+  </p>
+</div>
+
+<script>
+async function loadData(){
+  const tbody = document.getElementById('table-body');
+  try {
+    const response = await fetch('real_vs_predicted.csv');
+    const text = await response.text();
+    return parseCSV(text);
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="10" class="loading">Could not load data: ${err.message}</td></tr>`;
+    return [];
+  }
+}
+
+function parseCSV(text){
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',');
+  return lines.slice(1).map(line => {
+    // simple CSV split is fine here: no embedded commas in any field except real_strategy,
+    // which uses -> as a separator and never contains a comma
+    const cells = line.split(',');
+    const row = {};
+    headers.forEach((h,i) => row[h] = cells[i] ?? '');
+    return row;
+  });
+}
+
+let allRows = [];
+let currentModelFilter = 'all';
+let currentYearFilter = 'all';
+
+function render(){
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = '';
+  let lastYear = null;
+
+  let rows = allRows;
+  if (currentModelFilter !== 'all') rows = rows.filter(r => r.model === currentModelFilter);
+  if (currentYearFilter !== 'all') rows = rows.filter(r => r.year === currentYearFilter);
+
+  if (rows.length === 0){
+    tbody.innerHTML = '<tr><td colspan="10" class="loading">No rows match this filter.</td></tr>';
+    return;
+  }
+
+  rows.forEach(r => {
+    if (r.year !== lastYear){
+      lastYear = r.year;
+      const yearRow = document.createElement('tr');
+      yearRow.className = 'section-year';
+      yearRow.innerHTML = `<td colspan="10">${r.year} SEASON</td>`;
+      tbody.appendChild(yearRow);
+    }
+
+    const tr = document.createElement('tr');
+    const deltaNum = Number(r.delta_seconds);
+    const deltaClass = deltaNum < 0 ? 'faster' : 'slower';
+    const deltaLabel = deltaNum >= 0 ? `+${deltaNum.toFixed(1)}s` : `${deltaNum.toFixed(1)}s`;
+    const modelLabel = r.model === 'Model1_MILP' ? 'Model 1' : 'Model 2';
+    const isOutlier = r.outlier === '1';
+
+    tr.innerHTML = `
+      <td>${r.year}</td>
+      <td class="race-cell">${r.race}${isOutlier ? ' <span class="pill warn">data issue</span>' : ''}</td>
+      <td>${modelLabel}</td>
+      <td>${r.real_driver}</td>
+      <td>${Number(r.real_time_seconds).toFixed(1)}s</td>
+      <td>${r.real_pit_stops}</td>
+      <td class="strategy-cell">${r.real_strategy}</td>
+      <td>${Number(r.predicted_time_seconds).toFixed(1)}s</td>
+      <td>${r.predicted_pit_stops}</td>
+      <td class="delta ${deltaClass}">${deltaLabel}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentModelFilter = btn.dataset.model;
+    render();
+  });
+});
+
+document.getElementById('year-filter').addEventListener('change', (e) => {
+  currentYearFilter = e.target.value;
+  render();
+});
+
+loadData().then(rows => {
+  allRows = rows;
+  const years = [...new Set(rows.map(r => r.year))].sort();
+  const yearSelect = document.getElementById('year-filter');
+  years.forEach(y => {
+    const opt = document.createElement('option');
+    opt.value = y;
+    opt.textContent = y;
+    yearSelect.appendChild(opt);
+  });
+  render();
+});
+</script>

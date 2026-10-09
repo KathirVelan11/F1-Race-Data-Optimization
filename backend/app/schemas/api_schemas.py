@@ -31,6 +31,7 @@ class OptimizeScope2Request(BaseModel):
     race_name: str
     driver_code: Optional[str] = None
     min_pit_stops: Optional[int] = None
+    max_pit_stops: Optional[int] = None
     min_stint_length: Optional[int] = None
     max_sets_per_compound: Optional[Dict[str, int]] = None
     max_risk_tier_per_compound: Optional[Dict[str, int]] = None
@@ -44,6 +45,7 @@ class CompareStrategiesRequest(BaseModel):
     race_name: str
     driver_code: Optional[str] = None
     min_pit_stops: Optional[int] = None
+    max_pit_stops: Optional[int] = None
     min_stint_length: Optional[int] = None
     max_sets_per_compound: Optional[Dict[str, int]] = None
     max_risk_tier_per_compound: Optional[Dict[str, int]] = None
